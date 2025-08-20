@@ -40,14 +40,13 @@
 
 安装指南
 
-1. 下载安装包
-https://github.com/yundan125/campus_network/releases
+1. 下载安装包[直接下载](https://github.com/yundan125/campus_network/releases/download/ZIP/YSU_campus_network.zip)
 
 
-2. 解压文件
+3. 解压文件
 
 
-3. 配置账号信息（不要删除双引号，check_interval为检测是否有网络连接的周期时间（以秒为单位），timeout是各种等待操作的最大超时时间（以秒为单位））
+4. 配置账号信息（不要删除双引号，check_interval为检测是否有网络连接的周期时间（以秒为单位），timeout是各种等待操作的最大超时时间（以秒为单位））
 
 编辑config.json文件：
 {
