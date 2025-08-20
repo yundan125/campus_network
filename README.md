@@ -40,18 +40,14 @@
 
 安装指南
 
-1. 克隆仓库
-
-git clone https://github.com/yourusername/campus-network-auth.git
-cd campus-network-auth
+1. 下载安装包
+https://github.com/yundan125/campus_network/releases
 
 
-2. 安装依赖
-
-pip install -r requirements.txt
+2. 解压文件
 
 
-4. 配置账号信息（不要删除双引号，check_interval为检测是否有网络连接的周期时间（以秒为单位），timeout是各种等待操作的最大超时时间（以秒为单位））
+3. 配置账号信息（不要删除双引号，check_interval为检测是否有网络连接的周期时间（以秒为单位），timeout是各种等待操作的最大超时时间（以秒为单位））
 
 编辑config.json文件：
 {
@@ -64,9 +60,7 @@ pip install -r requirements.txt
 }
 
 
-使用说明
-
-运行程序
+4.运行程序
 
 压缩包中的exe可执行程序
 
@@ -113,24 +107,13 @@ check_interval 网络检查间隔（秒） 60
 
 timeout 操作超时时间（秒） 15
 
-打包为可执行文件
 
-
-
-贡献指南
-
-欢迎贡献代码！请遵循以下步骤：
-1. Fork仓库
-2. 创建新分支：git checkout -b feature/your-feature
-3. 提交更改：git commit -m 'Add some feature'
-4. 推送到分支：git push origin feature/your-feature
-5. 提交Pull Request
 
 联系方式
 
 如有任何问题或建议，请联系：
 • 邮箱：2693327171@qq.com
 
-• GitHub Issues：https://github.com/yundan125/campus_network/issues
+• 提交问题GitHub Issues：https://github.com/yundan125/campus_network/issues
 
 注意：本项目仅用于学习和技术交流，请遵守学校网络使用规定。
