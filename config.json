@@ -1,0 +1,9 @@
+{
+  "?": "不要删除双引号，check_interval为检测是否有网络连接的周期时间（以秒为单位），timeout是各种等待操作的最大超时时间（以秒为单位）",
+  "username": "学号",
+  "password": "密码",
+  "portal_url": "http://123.123.123.123",
+  "service_provider": "你的服务商（如中国电信、中国移动、中国联通、校园网）",
+  "check_interval": 60,
+  "timeout": 15
+}
