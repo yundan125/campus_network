@@ -1,118 +1,64 @@
-燕山大学校园网自动认证工具
+# NetAutoAuth
 
-项目简介
+**校园网自动认证工具** —— 托盘常驻，掉线自动重连，带可视化日志界面与设置界面。
 
-这是一个基于Python的校园网自动认证工具，专为燕山大学校园网环境设计。该工具能够自动检测网络连接状态，在断开时自动执行认证流程，无需人工干预。支持两种认证页面（auth.ysu.edu.cn和auth1.ysu.edu.cn），并能处理123.123.123.123由于HTTPS安全认证错误的特殊跳转页面。
+## ✨ 功能特性
+- 🔌 自动检测网络，每隔一段时间 `ping` 指定目标（默认百度），掉线时自动认证。
+- 🖥️ 托盘常驻（不显示在任务栏），右上角关闭按钮只会最小化到托盘。
+- 📋 可视化界面：查看实时日志，操作 **开始 / 停止 / 设置**。
+- ⚙️ 设置界面可修改：
+  - 账号、密码、运营商
+  - 检测目标（域名/IP）
+  - 检测间隔（秒）
+  - `ping` 超时（毫秒）
+  - 是否启动时自动开始监控
+  - 是否开机自启
+- 🖱️ 托盘右键菜单：**开始 / 停止 / 设置 / 退出程序**
+- 💾 配置保存到 `%APPDATA%\NetAutoAuth\config.json`
 
-功能特点
+## 📦 使用方法
+1. 双击运行 `NetAutoAuth.exe`  
+   - 程序不会显示在任务栏，只在右下角托盘区域常驻。
+2. **单击托盘图标**：显示/隐藏日志窗口。
+3. **右键托盘图标**：快速操作（开始 / 停止 / 设置 / 退出）。
+4. **设置**：可修改账号、网络检测配置等，点击保存即生效。
 
-• 自动网络检测：定期检查网络连接状态
+## ⚙️ 配置文件
+配置文件路径：
+%APPDATA%\NetAutoAuth\config.json
 
-• 智能认证流程：自动识别认证页面类型并执行相应操作
-
-• 多页面支持：支持auth.ysu.edu.cn和auth1.ysu.edu.cn两种认证页面
-
-• 特殊跳转处理：自动处理123.123.123.123的"继续访问网站"按钮
-
-• 系统托盘图标：后台运行，提供便捷操作入口
-
-• 日志记录：详细记录操作过程，便于调试
-
-• 配置文件管理：通过config.json轻松配置账号信息
-
-运行环境要求
-
-• 操作系统：Windows 10/11
-
-• Python：3.8+
-
-• 依赖库（打包程序中不出意外的话已经打包所有依赖库）：
-
-  • selenium
-
-  • pystray
-
-  • Pillow
-
-  • requests
-
-  • tkinter
-
-安装指南
-
-1. 下载安装包[直接下载](https://github.com/yundan125/campus_network/releases/download/ZIP/YSU_campus_network.zip)
-
-
-3. 解压文件
-
-
-4. 配置账号信息（不要删除双引号，check_interval为检测是否有网络连接的周期时间（以秒为单位），timeout是各种等待操作的最大超时时间（以秒为单位））
-
-编辑config.json文件：
+默认内容示例：
+```json
 {
-  "username": "学号",
-  "password": "密码",
-  "portal_url": "http://123.123.123.123",
-  "service_provider": "你的服务商（如中国电信、中国移动、中国联通、校园网）",
-  "check_interval": 60,
-  "timeout": 15
+  "user": "学号或账号",
+  "pwd": "密码",
+  "type": "校园网",
+  "check_host": "www.baidu.com",
+  "check_interval_sec": 60,
+  "ping_timeout_ms": 1500,
+  "auto_start_monitor": true,
+  "auto_start_with_windows": false
 }
+🛠️ 打包方法
+
+如果需要自行打包 exe：
+
+安装依赖：
+
+pip install PySide6 requests pyinstaller
 
 
-4.运行程序
+确保目录下有：
 
-压缩包中的exe可执行程序
+app.py（主程序）
 
+app.ico（图标，推荐多尺寸）
 
-系统托盘操作
+执行命令：
 
-程序启动后会在系统托盘显示图标：
-• 左键点击：显示/隐藏主窗口
-
-• 右键菜单：
-
-  • 显示主窗口
-
-  • 重新开始
-
-  • 强制停止
-
-  • 退出
-
-主窗口功能
-
-主窗口显示详细日志信息：
-• 实时显示网络状态
-
-• 记录认证过程
-
-• 显示错误信息
-
-配置文件说明
-
-config.json文件包含以下配置项：
-
-配置项 说明 示例值
-
-username 校园网账号（学号） "202312013456"
-
-password 校园网密码 "your_password"
-
-portal_url 认证入口URL "http://123.123.123.123"
-
-service_provider 服务提供商 "中国电信"、"中国移动"、"中国联通"、"校园网"
-
-check_interval 网络检查间隔（秒） 60
-
-timeout 操作超时时间（秒） 15
+pyinstaller --noconsole --onefile --icon=app.ico --name NetAutoAuth --add-data "app.ico;." app.py
 
 
+生成的程序在：
 
-联系方式
-
-如有任何问题或建议，请联系：
-• 邮箱：2693327171@qq.com
-
-• 提交问题GitHub Issues：https://github.com/yundan125/campus_network/issues
-
-注意：本项目仅用于学习和技术交流，请遵守学校网络使用规定。
+dist/NetAutoAuth.exe
