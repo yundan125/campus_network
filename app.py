@@ -5,8 +5,10 @@ import os
 import sys
 import json
 import re
+import time
 import platform
-import subprocess  # 仍保留（若后续需要扩展），不影响运行
+import subprocess
+import gzip
 from datetime import datetime
 
 from PySide6 import QtCore, QtGui, QtWidgets
@@ -15,17 +17,17 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "CloudLight校园网认证程序2.3"
+APP_NAME = "CloudLight燕山大学校园网认证程序2.5"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
-    # 运营商可选：'校园网'、'中国移动'、'中国联通'、'中国电信' 或 '0'/'1'/'2'/'3'
     "type": "校园网",
-    # 检测参数（不再 ping，仅定时触发认证检查）
-    "check_interval_sec": 30.0,   # 支持小数秒，建议 10~30
-    # 程序行为
-    "auto_start_monitor": True,        # 启动时自动开始监控
-    "auto_start_with_windows": False   # 开机自启
+    "check_interval_sec": 30.0,           # 周期检测间隔（秒）
+    "post_login_check_host": "www.baidu.com",
+    "post_login_ping_timeout_ms": 1500,
+    "reconnect_wait_sec": 5.0,            # 重连时等待时间（秒）
+    "auto_start_monitor": True,
+    "auto_start_with_windows": False
 }
 
 def appdata_dir():
@@ -55,14 +57,14 @@ def save_config(cfg: dict):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 def resource_path(rel: str) -> str:
-    if hasattr(sys, "_MEIPASS"):  # PyInstaller 单文件临时目录
+    if hasattr(sys, "_MEIPASS"):
         return os.path.join(sys._MEIPASS, rel)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
 ICON_PATH = resource_path("app.ico")
 
 # -----------------------------
-# 原有登录逻辑（尽量不改动）
+# 原有登录逻辑
 # -----------------------------
 class Main():
     def __init__(self):
@@ -78,16 +80,26 @@ class Main():
         }
         self.url = 'http://auth.ysu.edu.cn/eportal/InterFace.do?method='
         self.header = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36 Edge/17.17134'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/64.0.3282.140 Safari/537.36 Edge/17.17134',
+            'Accept-Encoding': 'gzip, deflate'
         }
         self.isLogined = None
         self.alldata = None
 
+    def _json_from_response(self, res):
+        try:
+            return res.json()
+        except Exception:
+            data = res.content
+            if len(data) >= 2 and data[0] == 0x1F and data[1] == 0x8B:
+                try:
+                    decompressed = gzip.decompress(data)
+                    return json.loads(decompressed.decode('utf-8'))
+                except Exception:
+                    pass
+            return json.loads(data.decode('utf-8', errors='strict'))
+
     def tst_net(self):
-        '''
-        测试网络是否认证
-        :return: 是否已经认证
-        '''
         res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
         if 'success.jsp' in res.url:
             self.isLogined = True
@@ -95,24 +107,7 @@ class Main():
             self.isLogined = False
         return self.isLogined
 
-    def isCode(self):
-        '''
-        检测是否需要输入验证码
-        未开放
-        :return:是否需要验证码
-        '''
-        pass
-        return False
-
     def login(self, user, pwd, type, code=''):
-        '''
-        输入参数登入校园网，自动检测当前网络是否认证。
-        :param user:登入id
-        :param pwd:登入密码
-        :param type:认证服务
-        :param code:验证码
-        :return:元祖第一项：是否认证状态；第二项：详细信息
-        '''
         if self.isLogined is None:
             self.tst_net()
         if self.isLogined is False:
@@ -132,7 +127,7 @@ class Main():
             self.data['queryString'] = queryString[0]
 
             res = requests.post(self.url + 'login', headers=self.header, data=self.data, timeout=8)
-            login_json = json.loads(res.content.decode('utf-8'))
+            login_json = self._json_from_response(res)
             self.userindex = login_json.get('userIndex')
             self.info = login_json.get('message', '')
             if login_json.get('result') == 'success':
@@ -142,28 +137,16 @@ class Main():
         return (True, '已经在线')
 
     def get_alldata(self):
-        '''
-        获取当前认证账号全部信息
-        #！！！注意！！！#此操作会获得账号alldata['userId']姓名alldata['userName']以及密码alldata['password']
-        :return:全部数据的字典格式
-        '''
         res = requests.get('http://10.11.0.1/eportal/InterFace.do?method=getOnlineUserInfo', timeout=5)
-        try:
-            self.alldata = json.loads(res.content.decode('utf-8'))
-        except json.decoder.JSONDecodeError:
-            print('数据解析失败，请稍后重试。')
+        self.alldata = self._json_from_response(res)
         return self.alldata
 
     def logout(self):
-        '''
-        登出，操作内会自动获取特征码
-        :return:元祖第一项：是否操作成功；第二项：详细信息
-        '''
         if self.alldata is None:
             self.get_alldata()
         res = requests.post(self.url + 'logout', headers=self.header,
                             data={'userIndex': self.alldata.get('userIndex')}, timeout=8)
-        logout_json = json.loads(res.content.decode('utf-8'))
+        logout_json = self._json_from_response(res)
         self.info = logout_json.get('message', '')
         if logout_json.get('result') == 'success':
             return (True, '下线成功')
@@ -171,7 +154,7 @@ class Main():
             return (False, self.info)
 
 # -----------------------------
-# 监控 worker（QThread + QTimer 事件驱动；不再 ping）
+# 监控 worker
 # -----------------------------
 class MonitorWorker(QtCore.QObject):
     log = QtCore.Signal(str)
@@ -179,7 +162,7 @@ class MonitorWorker(QtCore.QObject):
 
     def __init__(self, cfg_getter):
         super().__init__()
-        self._cfg_getter = cfg_getter   # 函数：返回最新配置 dict
+        self._cfg_getter = cfg_getter
         self._main = Main()
         self._running = False
         self._timer = QtCore.QTimer(self)
@@ -194,8 +177,7 @@ class MonitorWorker(QtCore.QObject):
         self.runningChanged.emit(True)
         self._apply_interval_from_cfg()
         self._timer.start()
-        self.log.emit(self._ts() + "监控已启动（认证检测，无 ping）")
-        # 立即执行一次
+        self.log.emit(self._ts() + "监控已启动")
         QtCore.QTimer.singleShot(0, self._tick)
 
     @QtCore.Slot()
@@ -216,19 +198,56 @@ class MonitorWorker(QtCore.QObject):
             interval_sec = float(cfg.get("check_interval_sec", 30.0))
         except Exception:
             interval_sec = 30.0
-        interval_sec = max(1.0, interval_sec)  # 安全下限：1秒，避免过于频繁
+        interval_sec = max(1.0, interval_sec)
         self._timer.setInterval(int(interval_sec * 1000))
+
+    # 仅用于“认证成功后”的外网检查
+    def _ping_once(self, host, timeout_ms):
+        system = platform.system().lower()
+        if 'windows' in system:
+            cmd = ['ping', '-n', '1', '-w', str(int(timeout_ms)), host]
+            CREATE_NO_WINDOW = 0x08000000
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=(int(timeout_ms) / 1000.0 + 1),
+                    creationflags=CREATE_NO_WINDOW,
+                    startupinfo=si
+                )
+                return proc.returncode == 0
+            except Exception:
+                return False
+        else:
+            cmd = ['ping', '-c', '1', host]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=(int(timeout_ms) / 1000.0 + 1)
+                )
+                return proc.returncode == 0
+            except Exception:
+                return False
+
+    def _sleep_with_cancel(self, sec):
+        """可中断睡眠：避免长等待期间无法停止。"""
+        end = time.time() + max(0.0, float(sec))
+        while self._running and time.time() < end:
+            time.sleep(min(0.1, end - time.time()))
 
     @QtCore.Slot()
     def _tick(self):
         if not self._running:
             return
-
-        # 动态读取配置（设置里改了值，这里自动生效）
         self._apply_interval_from_cfg()
         cfg = self._cfg_getter()
 
-        # 1) 直接检测是否已在线（访问 10.11.0.1）
+        # 1) 检查是否在线
         try:
             online = self._main.tst_net()
         except Exception as e:
@@ -239,7 +258,7 @@ class MonitorWorker(QtCore.QObject):
             self.log.emit(self._ts() + "网络正常（已在线）")
             return
 
-        # 2) 未在线则尝试认证
+        # 2) 尝试认证
         self.log.emit(self._ts() + "未认证，尝试自动认证...")
         try:
             state, info = self._main.login(
@@ -250,9 +269,60 @@ class MonitorWorker(QtCore.QObject):
             self.log.emit(self._ts() + f"认证结果：{info}")
         except Exception as e:
             self.log.emit(self._ts() + f"认证异常：{e}")
+            return
+
+        # 3) 若认证成功但外网不通 → 持续重试直到通或停止
+        if state:
+            host = cfg.get("post_login_check_host", "www.baidu.com")
+            tout = int(cfg.get("post_login_ping_timeout_ms", 1500))
+            wait_sec = float(cfg.get("reconnect_wait_sec", 5.0))
+
+            while self._running:
+                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{host}）...")
+                self._sleep_with_cancel(3.0)
+                if not self._running:
+                    break
+
+                ok = False
+                try:
+                    ok = self._ping_once(host, tout)
+                except Exception as e:
+                    self.log.emit(self._ts() + f"外网检查异常：{e}")
+                    ok = False
+
+                if ok:
+                    self.log.emit(self._ts() + f"外网连通性正常（{host} 可达）")
+                    break  # 成功，结束重试
+
+                # 外网不通 → 下线并重试
+                self.log.emit(self._ts() + "外网不通，执行下线并重试认证...")
+                try:
+                    self._main.logout()
+                except Exception as e:
+                    self.log.emit(self._ts() + f"下线异常：{e}")
+
+                self.log.emit(self._ts() + f"等待 {wait_sec} 秒后再重试认证...")
+                self._sleep_with_cancel(wait_sec)
+                if not self._running:
+                    break
+
+                try:
+                    state2, info2 = self._main.login(
+                        user=cfg.get("user", ""),
+                        pwd=cfg.get("pwd", ""),
+                        type=cfg.get("type", "校园网")
+                    )
+                    self.log.emit(self._ts() + f"重试认证结果：{info2}")
+                except Exception as e:
+                    self.log.emit(self._ts() + f"重试认证异常：{e}")
+                    # 等待后继续下一轮
+                    continue
+
+                # 若重试认证失败也继续下一轮；成功则回到 while 顶部再次做 3 秒后外网检查
+            return
 
 # -----------------------------
-# 设置对话框（去掉 ping 相关项）
+# 设置对话框
 # -----------------------------
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, cfg: dict, parent=None):
@@ -274,12 +344,17 @@ class SettingsDialog(QtWidgets.QDialog):
         if idx >= 0:
             self.cmb_type.setCurrentIndex(idx)
 
-        # 仅保留“检测间隔（秒）”
         self.sp_interval = QtWidgets.QDoubleSpinBox()
-        self.sp_interval.setRange(0.01, 86400.0)   # 最小 1 秒，避免过于频繁
+        self.sp_interval.setRange(1.0, 86400.0)
         self.sp_interval.setDecimals(2)
         self.sp_interval.setSingleStep(1.0)
         self.sp_interval.setValue(float(self.cfg.get("check_interval_sec", 30.0)))
+
+        self.sp_reconnect_wait = QtWidgets.QDoubleSpinBox()
+        self.sp_reconnect_wait.setRange(0.0, 60.0)
+        self.sp_reconnect_wait.setDecimals(1)
+        self.sp_reconnect_wait.setSingleStep(0.5)
+        self.sp_reconnect_wait.setValue(float(self.cfg.get("reconnect_wait_sec", 5.0)))
 
         self.chk_auto_monitor = QtWidgets.QCheckBox("启动时自动开始监控")
         self.chk_auto_monitor.setChecked(bool(self.cfg.get("auto_start_monitor", True)))
@@ -291,6 +366,7 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("密码：", self.ed_pwd)
         form.addRow("运营商：", self.cmb_type)
         form.addRow("检测间隔（秒）：", self.sp_interval)
+        form.addRow("重连时等待时间（秒）：", self.sp_reconnect_wait)
         form.addRow("", self.chk_auto_monitor)
         form.addRow("", self.chk_boot)
 
@@ -313,28 +389,26 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg["pwd"] = self.ed_pwd.text()
         self.cfg["type"] = self.cmb_type.currentText().strip()
         self.cfg["check_interval_sec"] = float(self.sp_interval.value())
+        self.cfg["reconnect_wait_sec"] = float(self.sp_reconnect_wait.value())
         self.cfg["auto_start_monitor"] = bool(self.chk_auto_monitor.isChecked())
         self.cfg["auto_start_with_windows"] = bool(self.chk_boot.isChecked())
         return self.cfg
 
 # -----------------------------
-# 主窗口（不在任务栏显示）
+# 主窗口
 # -----------------------------
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        # 不在任务栏显示
-        self.setWindowFlag(QtCore.Qt.Tool)
+        self.setWindowFlag(QtCore.Qt.Tool)  # 不在任务栏显示
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QtGui.QIcon(ICON_PATH))
         self.resize(780, 460)
 
-        # 日志视图
         self.log_view = QtWidgets.QTextEdit()
         self.log_view.setReadOnly(True)
         self.setCentralWidget(self.log_view)
 
-        # 工具栏按钮
         tb = QtWidgets.QToolBar()
         self.addToolBar(QtCore.Qt.TopToolBarArea, tb)
         self.btn_start = QtGui.QAction("开始", self)
@@ -345,7 +419,6 @@ class MainWindow(QtWidgets.QMainWindow):
         tb.addSeparator()
         tb.addAction(self.btn_settings)
 
-        # 托盘
         self.tray = QtWidgets.QSystemTrayIcon(QtGui.QIcon(ICON_PATH), self)
         self.tray.setToolTip(APP_NAME)
         self.tray.activated.connect(self.on_tray_activated)
@@ -359,7 +432,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.show()
 
-        # 连接信号
         self.btn_start.triggered.connect(self.start_monitor)
         self.btn_stop.triggered.connect(self.stop_monitor)
         self.btn_settings.triggered.connect(self.open_settings)
@@ -368,10 +440,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_settings.triggered.connect(self.open_settings)
         self.act_exit.triggered.connect(self.exit_app)
 
-        # 配置与监控
         self.cfg = load_config()
 
-        # Worker + 线程
         self.worker = MonitorWorker(self.get_config)
         self.worker_thread = QtCore.QThread(self)
         self.worker.moveToThread(self.worker_thread)
@@ -379,15 +449,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.worker.runningChanged.connect(self.on_running_changed)
         self.worker_thread.start()
 
-        # 自启动监控
         if self.cfg.get("auto_start_monitor", True):
             QtCore.QTimer.singleShot(500, self.start_monitor)
 
-        # 应用开机自启
         self.apply_autostart(self.cfg.get("auto_start_with_windows", False))
-
-        # 初始隐藏（只在托盘）
-        self.hide()
+        self.hide()  # 初始隐藏，只在托盘
 
     def get_config(self):
         return self.cfg
@@ -404,7 +470,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_view.append(s)
 
     def on_tray_activated(self, reason):
-        if reason == QtWidgets.QSystemTrayIcon.Trigger:  # 单击
+        if reason == QtWidgets.QSystemTrayIcon.Trigger:  # 单击托盘图标
             self.toggle_show()
 
     def toggle_show(self):
@@ -429,17 +495,14 @@ class MainWindow(QtWidgets.QMainWindow):
             new_cfg = dlg.get_config()
             was_running = self.act_stop.isEnabled()
 
-            # 应用开机自启
             self.apply_autostart(new_cfg.get("auto_start_with_windows", False))
 
-            # 更新并落盘
             self.cfg = new_cfg
             save_config(self.cfg)
 
             self.append_log(self.ts() + "已保存设置")
             self.show_message("设置已保存")
 
-            # 若正在运行，立即生效（重启监控）
             if was_running:
                 self.stop_monitor()
                 QtCore.QTimer.singleShot(150, self.start_monitor)
@@ -475,7 +538,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_message("程序已最小化到托盘。右键托盘图标可退出。")
 
     def exit_app(self):
-        # 优雅退出：先停监控，再关闭线程与应用
+        # 优雅退出
         QtCore.QMetaObject.invokeMethod(self.worker, "stop", QtCore.Qt.QueuedConnection)
         QtCore.QTimer.singleShot(100, self._final_quit)
 
