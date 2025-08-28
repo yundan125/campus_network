@@ -17,15 +17,25 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "CloudLight燕山大学校园网认证程序2.5"
+APP_NAME = "NetAutoAuth"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
     "type": "校园网",
-    "check_interval_sec": 30.0,           # 周期检测间隔（秒）
-    "post_login_check_host": "www.baidu.com",
-    "post_login_ping_timeout_ms": 1500,
-    "reconnect_wait_sec": 5.0,            # 重连时等待时间（秒）
+
+    # 周期性检测（按 ping 判断是否有网）
+    "check_host": "www.baidu.com",
+    "ping_timeout_ms": 1500,
+    "check_interval_sec": 30.0,  # 周期检测间隔（秒）
+
+    # 刚认证成功后的外网二次校验（如未设置则回退到上面的检测目标与超时）
+    "post_login_check_host": "",           # 为空则使用 check_host
+    "post_login_ping_timeout_ms": 0,       # <=0 则使用 ping_timeout_ms
+
+    # 重连等待
+    "reconnect_wait_sec": 5.0,
+
+    # 程序行为
     "auto_start_monitor": True,
     "auto_start_with_windows": False
 }
@@ -100,11 +110,9 @@ class Main():
             return json.loads(data.decode('utf-8', errors='strict'))
 
     def tst_net(self):
+        """是否已通过校园网认证（不代表外网可达）"""
         res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
-        if 'success.jsp' in res.url:
-            self.isLogined = True
-        else:
-            self.isLogined = False
+        self.isLogined = ('success.jsp' in res.url)
         return self.isLogined
 
     def login(self, user, pwd, type, code=''):
@@ -154,7 +162,7 @@ class Main():
             return (False, self.info)
 
 # -----------------------------
-# 监控 worker
+# 监控 worker（QTimer 驱动，按 ping 检测）
 # -----------------------------
 class MonitorWorker(QtCore.QObject):
     log = QtCore.Signal(str)
@@ -201,8 +209,8 @@ class MonitorWorker(QtCore.QObject):
         interval_sec = max(1.0, interval_sec)
         self._timer.setInterval(int(interval_sec * 1000))
 
-    # 仅用于“认证成功后”的外网检查
     def _ping_once(self, host, timeout_ms):
+        """静默 ping：Windows 下不弹出终端窗口"""
         system = platform.system().lower()
         if 'windows' in system:
             cmd = ['ping', '-n', '1', '-w', str(int(timeout_ms)), host]
@@ -235,7 +243,7 @@ class MonitorWorker(QtCore.QObject):
                 return False
 
     def _sleep_with_cancel(self, sec):
-        """可中断睡眠：避免长等待期间无法停止。"""
+        """可中断睡眠，停止时能快速退出等待。"""
         end = time.time() + max(0.0, float(sec))
         while self._running and time.time() < end:
             time.sleep(min(0.1, end - time.time()))
@@ -247,19 +255,27 @@ class MonitorWorker(QtCore.QObject):
         self._apply_interval_from_cfg()
         cfg = self._cfg_getter()
 
-        # 1) 检查是否在线
+        # 1) 先按 ping 检测外网是否可达
+        host = (cfg.get("check_host") or "www.baidu.com").strip()
         try:
-            online = self._main.tst_net()
-        except Exception as e:
-            self.log.emit(self._ts() + f"检测异常：{e}")
-            online = False
+            tout = int(cfg.get("ping_timeout_ms", 1500))
+        except Exception:
+            tout = 1500
 
-        if online:
-            self.log.emit(self._ts() + "网络正常（已在线）")
+        ok = False
+        try:
+            ok = self._ping_once(host, tout)
+        except Exception as e:
+            self.log.emit(self._ts() + f"检测 ping 异常：{e}")
+            ok = False
+
+        if ok:
+            self.log.emit(self._ts() + f"网络正常 | ping {host} 成功")
             return
 
-        # 2) 尝试认证
-        self.log.emit(self._ts() + "未认证，尝试自动认证...")
+        # 2) 不通则尝试认证（先看看是否未登录）
+        #    这里可以直接尝试 login；tst_net 只是判断是否在线，login 内部也会自行判断
+        self.log.emit(self._ts() + "外网不通，尝试认证校园网...")
         try:
             state, info = self._main.login(
                 user=cfg.get("user", ""),
@@ -271,31 +287,31 @@ class MonitorWorker(QtCore.QObject):
             self.log.emit(self._ts() + f"认证异常：{e}")
             return
 
-        # 3) 若认证成功但外网不通 → 持续重试直到通或停止
+        # 3) 若认证成功但外网仍不通 → 持续重试直到通或停止
         if state:
-            host = cfg.get("post_login_check_host", "www.baidu.com")
-            tout = int(cfg.get("post_login_ping_timeout_ms", 1500))
+            post_host = (cfg.get("post_login_check_host") or host).strip()
+            post_tout = int(cfg.get("post_login_ping_timeout_ms") or tout)
             wait_sec = float(cfg.get("reconnect_wait_sec", 5.0))
 
             while self._running:
-                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{host}）...")
+                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{post_host}）...")
                 self._sleep_with_cancel(3.0)
                 if not self._running:
                     break
 
-                ok = False
+                ok2 = False
                 try:
-                    ok = self._ping_once(host, tout)
+                    ok2 = self._ping_once(post_host, post_tout)
                 except Exception as e:
                     self.log.emit(self._ts() + f"外网检查异常：{e}")
-                    ok = False
+                    ok2 = False
 
-                if ok:
-                    self.log.emit(self._ts() + f"外网连通性正常（{host} 可达）")
+                if ok2:
+                    self.log.emit(self._ts() + f"外网连通性正常（{post_host} 可达）")
                     break  # 成功，结束重试
 
                 # 外网不通 → 下线并重试
-                self.log.emit(self._ts() + "外网不通，执行下线并重试认证...")
+                self.log.emit(self._ts() + "外网仍不可达，执行下线并重试认证...")
                 try:
                     self._main.logout()
                 except Exception as e:
@@ -322,7 +338,7 @@ class MonitorWorker(QtCore.QObject):
             return
 
 # -----------------------------
-# 设置对话框
+# 设置对话框（加入 ping 相关设置）
 # -----------------------------
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, cfg: dict, parent=None):
@@ -343,6 +359,13 @@ class SettingsDialog(QtWidgets.QDialog):
         idx = self.cmb_type.findText(self.cfg.get("type", "校园网"))
         if idx >= 0:
             self.cmb_type.setCurrentIndex(idx)
+
+        # 检测参数（按 ping）
+        self.ed_host = QtWidgets.QLineEdit(self.cfg.get("check_host", "www.baidu.com"))
+        self.sp_ping_timeout = QtWidgets.QSpinBox()
+        self.sp_ping_timeout.setRange(200, 20000)
+        self.sp_ping_timeout.setSingleStep(100)
+        self.sp_ping_timeout.setValue(int(self.cfg.get("ping_timeout_ms", 1500)))
 
         self.sp_interval = QtWidgets.QDoubleSpinBox()
         self.sp_interval.setRange(1.0, 86400.0)
@@ -365,6 +388,8 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("账号：", self.ed_user)
         form.addRow("密码：", self.ed_pwd)
         form.addRow("运营商：", self.cmb_type)
+        form.addRow("检测目标（ping）：", self.ed_host)
+        form.addRow("ping 超时（毫秒）：", self.sp_ping_timeout)
         form.addRow("检测间隔（秒）：", self.sp_interval)
         form.addRow("重连时等待时间（秒）：", self.sp_reconnect_wait)
         form.addRow("", self.chk_auto_monitor)
@@ -388,6 +413,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg["user"] = self.ed_user.text().strip()
         self.cfg["pwd"] = self.ed_pwd.text()
         self.cfg["type"] = self.cmb_type.currentText().strip()
+        self.cfg["check_host"] = self.ed_host.text().strip() or "www.baidu.com"
+        self.cfg["ping_timeout_ms"] = int(self.sp_ping_timeout.value())
         self.cfg["check_interval_sec"] = float(self.sp_interval.value())
         self.cfg["reconnect_wait_sec"] = float(self.sp_reconnect_wait.value())
         self.cfg["auto_start_monitor"] = bool(self.chk_auto_monitor.isChecked())
