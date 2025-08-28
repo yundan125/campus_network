@@ -17,7 +17,7 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "CloudLight燕山大学校园网自动认证程序2.7"
+APP_NAME = "CloudLight燕山大学校园网认证程序2.8"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
@@ -25,12 +25,14 @@ DEFAULT_CONFIG = {
 
     # 周期性检测（按 ping 判断是否有网）
     "check_host": "www.baidu.com",
+    "fallback_check_host": "223.5.5.5",          # 新增：阿里备用（AliDNS）
     "ping_timeout_ms": 1500,
-    "check_interval_sec": 30.0,  # 周期检测间隔（秒）
+    "check_interval_sec": 30.0,                   # 周期检测间隔（秒）
 
-    # 刚认证成功后的外网二次校验（如未设置则回退到上面的检测目标与超时）
-    "post_login_check_host": "",           # 为空则使用 check_host
-    "post_login_ping_timeout_ms": 0,       # <=0 则使用 ping_timeout_ms
+    # 登录成功后的二次校验（留空/0 则回退到上面的检测目标与超时）
+    "post_login_check_host": "",
+    "post_login_fallback_host": "",               # 新增：登录后备用目标
+    "post_login_ping_timeout_ms": 0,
 
     # 重连等待
     "reconnect_wait_sec": 5.0,
@@ -71,7 +73,7 @@ def resource_path(rel: str) -> str:
         return os.path.join(sys._MEIPASS, rel)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
-ICON_PATH = resource_path("my_logo.ico")
+ICON_PATH = resource_path("app.ico")
 
 # -----------------------------
 # 原有登录逻辑（增强：安全解析 + 认证前先下线）
@@ -118,11 +120,6 @@ class Main():
 
     # —— 安全解析：文本（用于从 HTML 中提取 queryString） —— #
     def _text_from_response(self, res):
-        """
-        安全解析文本：
-        1) 先用 res.text（requests 会基于 apparent_encoding 尝试解码）
-        2) 若失败，手工判断 gzip 头并解压，再 utf-8 解码（errors='replace' 避免 0x8b 报错）
-        """
         try:
             return res.text
         except Exception:
@@ -133,7 +130,6 @@ class Main():
                 return gzip.decompress(data).decode('utf-8', errors='replace')
             return data.decode('utf-8', errors='replace')
         except Exception:
-            # 最后兜底：无论如何返回二进制预览，避免崩溃
             return ''
 
     def tst_net(self):
@@ -145,7 +141,6 @@ class Main():
     def _try_logout_once(self):
         """无论是否在线，都尝试获取 userIndex 并调用 logout，失败忽略。"""
         try:
-            # 尝试拿在线信息（若不在线可能返回空或报错）
             if self.alldata is None:
                 try:
                     res_info = requests.get('http://10.11.0.1/eportal/InterFace.do?method=getOnlineUserInfo', timeout=5)
@@ -160,48 +155,36 @@ class Main():
             if user_index:
                 res = requests.post(self.url + 'logout', headers=self.header,
                                     data={'userIndex': user_index}, timeout=8)
-                # 解析但不强校验结果，避免阻断流程
                 _ = self._json_from_response(res)
         except Exception:
-            pass  # 任何异常都吞掉，保证“登录前先下线”的意图不影响后续
+            pass
         finally:
-            # 下线后清空缓存，避免复用旧 userIndex
             self.alldata = None
 
     def login(self, user, pwd, type, code=''):
         # 1) 无论是否在线，先“尝试下线”一次
         self._try_logout_once()
 
-        # 2) 确认当前状态
+        # 2) 刷新状态
         if self.isLogined is None:
             try:
                 self.tst_net()
             except Exception:
                 self.isLogined = False
 
-        # 3) 若已在线，仍然执行一次登录（有些门户需要重新带 queryString 刷新会话）
-        #    但为兼容旧逻辑：如果你更倾向“已在线就直接返回”，取消下面注释并删除继续分支。
-        # if self.isLogined:
-        #     return (True, '已经在线')
-
-        # 4) 执行登录流程
+        # 3) 执行登录流程
         if user == '' or pwd == '':
             return (False, '用户名或密码为空')
 
-        # 4.1 先拿 queryString
+        # 3.1 先拿 queryString
         res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
         html = self._text_from_response(res)
         query = re.findall(r"href='.*?\?(.*?)'", html, re.S)
         if not query:
-            # 兜底：有些页面结构变化，尝试另一种匹配方式
             query = re.findall(r'href="[^"]+\?([^"]+)"', html, re.S)
-        if not query:
-            # 仍然失败：允许继续尝试登录（某些门户并不严格需要 queryString）
-            query_string = ''
-        else:
-            query_string = query[0]
+        query_string = query[0] if query else ''
 
-        # 4.2 组织参数并提交
+        # 3.2 提交
         self.data = {
             'userId': user,
             'password': pwd,
@@ -235,7 +218,6 @@ class Main():
         if isinstance(self.alldata, dict):
             user_index = self.alldata.get('userIndex')
         if not user_index:
-            # 没有 userIndex 也尝试调用一次，某些门户不严格
             user_index = ''
         res = requests.post(self.url + 'logout', headers=self.header,
                             data={'userIndex': user_index}, timeout=8)
@@ -328,6 +310,16 @@ class MonitorWorker(QtCore.QObject):
             except Exception:
                 return False
 
+    def _ping_pair_ok(self, primary_host, fallback_host, timeout_ms):
+        """先 ping 主目标，不通再 ping 备用；任一成功即判定可达。"""
+        if primary_host:
+            if self._ping_once(primary_host, timeout_ms):
+                return True, primary_host
+        if fallback_host and fallback_host != primary_host:
+            if self._ping_once(fallback_host, timeout_ms):
+                return True, fallback_host
+        return False, fallback_host or primary_host
+
     def _sleep_with_cancel(self, sec):
         """可中断睡眠，停止时能快速退出等待。"""
         end = time.time() + max(0.0, float(sec))
@@ -341,26 +333,22 @@ class MonitorWorker(QtCore.QObject):
         self._apply_interval_from_cfg()
         cfg = self._cfg_getter()
 
-        # 1) 先按 ping 检测外网是否可达
-        host = (cfg.get("check_host") or "www.baidu.com").strip()
+        # 读取检测参数
+        primary = (cfg.get("check_host") or "www.baidu.com").strip()
+        fallback = (cfg.get("fallback_check_host") or "223.5.5.5").strip()
         try:
             tout = int(cfg.get("ping_timeout_ms", 1500))
         except Exception:
             tout = 1500
 
-        ok = False
-        try:
-            ok = self._ping_once(host, tout)
-        except Exception as e:
-            self.log.emit(self._ts() + f"检测 ping 异常：{e}")
-            ok = False
-
+        # 1) 先按两级 ping 检测外网是否可达
+        ok, hit = self._ping_pair_ok(primary, fallback, tout)
         if ok:
-            self.log.emit(self._ts() + f"网络正常 | ping {host} 成功")
+            self.log.emit(self._ts() + f"网络正常 | ping {hit} 成功")
             return
 
         # 2) 不通则尝试认证（认证前先下线的逻辑在 Main.login() 内部已实现）
-        self.log.emit(self._ts() + "外网不通，尝试认证校园网...")
+        self.log.emit(self._ts() + f"外网不通（{primary} / {fallback} 均失败），尝试认证校园网...")
         try:
             state, info = self._main.login(
                 user=cfg.get("user", ""),
@@ -372,27 +360,22 @@ class MonitorWorker(QtCore.QObject):
             self.log.emit(self._ts() + f"认证异常：{e}")
             return
 
-        # 3) 若认证成功但外网仍不通 → 持续重试直到通或停止
+        # 3) 若认证成功但外网仍不通 → 持续重试直到通或停止（两级 ping）
         if state:
-            post_host = (cfg.get("post_login_check_host") or host).strip()
+            post_primary = (cfg.get("post_login_check_host") or primary).strip()
+            post_fallback = (cfg.get("post_login_fallback_host") or fallback).strip()
             post_tout = int(cfg.get("post_login_ping_timeout_ms") or tout)
             wait_sec = float(cfg.get("reconnect_wait_sec", 5.0))
 
             while self._running:
-                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{post_host}）...")
+                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{post_primary} / {post_fallback}）...")
                 self._sleep_with_cancel(3.0)
                 if not self._running:
                     break
 
-                ok2 = False
-                try:
-                    ok2 = self._ping_once(post_host, post_tout)
-                except Exception as e:
-                    self.log.emit(self._ts() + f"外网检查异常：{e}")
-                    ok2 = False
-
+                ok2, hit2 = self._ping_pair_ok(post_primary, post_fallback, post_tout)
                 if ok2:
-                    self.log.emit(self._ts() + f"外网连通性正常（{post_host} 可达）")
+                    self.log.emit(self._ts() + f"外网连通性正常（{hit2} 可达）")
                     break  # 成功，结束重试
 
                 # 外网不通 → 下线并重试
@@ -416,14 +399,11 @@ class MonitorWorker(QtCore.QObject):
                     self.log.emit(self._ts() + f"重试认证结果：{info2}")
                 except Exception as e:
                     self.log.emit(self._ts() + f"重试认证异常：{e}")
-                    # 等待后继续下一轮
                     continue
-
-                # 若重试认证失败也继续下一轮；成功则回到 while 顶部再次做 3 秒后外网检查
             return
 
 # -----------------------------
-# 设置对话框（加入 ping 相关设置）
+# 设置对话框（加入 ping 主/备目标设置）
 # -----------------------------
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, cfg: dict, parent=None):
@@ -447,6 +427,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         # 检测参数（按 ping）
         self.ed_host = QtWidgets.QLineEdit(self.cfg.get("check_host", "www.baidu.com"))
+        self.ed_fallback = QtWidgets.QLineEdit(self.cfg.get("fallback_check_host", "223.5.5.5"))
         self.sp_ping_timeout = QtWidgets.QSpinBox()
         self.sp_ping_timeout.setRange(200, 20000)
         self.sp_ping_timeout.setSingleStep(100)
@@ -470,13 +451,25 @@ class SettingsDialog(QtWidgets.QDialog):
         self.chk_boot = QtWidgets.QCheckBox("开机自启")
         self.chk_boot.setChecked(bool(self.cfg.get("auto_start_with_windows", False)))
 
+        # 登录后二次校验（可选）
+        self.ed_post_host = QtWidgets.QLineEdit(self.cfg.get("post_login_check_host", ""))
+        self.ed_post_fallback = QtWidgets.QLineEdit(self.cfg.get("post_login_fallback_host", ""))
+        self.sp_post_timeout = QtWidgets.QSpinBox()
+        self.sp_post_timeout.setRange(0, 20000)  # 0 表示回退到 ping_timeout_ms
+        self.sp_post_timeout.setSingleStep(100)
+        self.sp_post_timeout.setValue(int(self.cfg.get("post_login_ping_timeout_ms", 0)))
+
         form.addRow("账号：", self.ed_user)
         form.addRow("密码：", self.ed_pwd)
         form.addRow("运营商：", self.cmb_type)
-        form.addRow("检测目标（ping）：", self.ed_host)
+        form.addRow("检测目标（ping 主）：", self.ed_host)
+        form.addRow("备用检测目标（ping 备）：", self.ed_fallback)
         form.addRow("ping 超时（毫秒）：", self.sp_ping_timeout)
         form.addRow("检测间隔（秒）：", self.sp_interval)
         form.addRow("重连时等待时间（秒）：", self.sp_reconnect_wait)
+        form.addRow("登录后检测目标（可留空）：", self.ed_post_host)
+        form.addRow("登录后备用目标（可留空）：", self.ed_post_fallback)
+        form.addRow("登录后 ping 超时（毫秒，0=沿用）：", self.sp_post_timeout)
         form.addRow("", self.chk_auto_monitor)
         form.addRow("", self.chk_boot)
 
@@ -499,9 +492,13 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg["pwd"] = self.ed_pwd.text()
         self.cfg["type"] = self.cmb_type.currentText().strip()
         self.cfg["check_host"] = self.ed_host.text().strip() or "www.baidu.com"
+        self.cfg["fallback_check_host"] = self.ed_fallback.text().strip() or "223.5.5.5"
         self.cfg["ping_timeout_ms"] = int(self.sp_ping_timeout.value())
         self.cfg["check_interval_sec"] = float(self.sp_interval.value())
         self.cfg["reconnect_wait_sec"] = float(self.sp_reconnect_wait.value())
+        self.cfg["post_login_check_host"] = self.ed_post_host.text().strip()
+        self.cfg["post_login_fallback_host"] = self.ed_post_fallback.text().strip()
+        self.cfg["post_login_ping_timeout_ms"] = int(self.sp_post_timeout.value())
         self.cfg["auto_start_monitor"] = bool(self.chk_auto_monitor.isChecked())
         self.cfg["auto_start_with_windows"] = bool(self.chk_boot.isChecked())
         return self.cfg
