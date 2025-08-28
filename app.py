@@ -17,7 +17,7 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "NetAutoAuth"
+APP_NAME = "CloudLight燕山大学校园网自动认证程序2.7"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
@@ -71,10 +71,10 @@ def resource_path(rel: str) -> str:
         return os.path.join(sys._MEIPASS, rel)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
-ICON_PATH = resource_path("app.ico")
+ICON_PATH = resource_path("my_logo.ico")
 
 # -----------------------------
-# 原有登录逻辑
+# 原有登录逻辑（增强：安全解析 + 认证前先下线）
 # -----------------------------
 class Main():
     def __init__(self):
@@ -96,7 +96,14 @@ class Main():
         self.isLogined = None
         self.alldata = None
 
+    # —— 安全解析：JSON —— #
     def _json_from_response(self, res):
+        """
+        安全解析 JSON：
+        1) 优先 res.json()
+        2) 若失败，检查 gzip 头（1F 8B），尝试手动解压再解析
+        3) 再失败则按 UTF-8 严格解析
+        """
         try:
             return res.json()
         except Exception:
@@ -109,40 +116,112 @@ class Main():
                     pass
             return json.loads(data.decode('utf-8', errors='strict'))
 
+    # —— 安全解析：文本（用于从 HTML 中提取 queryString） —— #
+    def _text_from_response(self, res):
+        """
+        安全解析文本：
+        1) 先用 res.text（requests 会基于 apparent_encoding 尝试解码）
+        2) 若失败，手工判断 gzip 头并解压，再 utf-8 解码（errors='replace' 避免 0x8b 报错）
+        """
+        try:
+            return res.text
+        except Exception:
+            pass
+        data = res.content
+        try:
+            if len(data) >= 2 and data[0] == 0x1F and data[1] == 0x8B:
+                return gzip.decompress(data).decode('utf-8', errors='replace')
+            return data.decode('utf-8', errors='replace')
+        except Exception:
+            # 最后兜底：无论如何返回二进制预览，避免崩溃
+            return ''
+
     def tst_net(self):
         """是否已通过校园网认证（不代表外网可达）"""
         res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
         self.isLogined = ('success.jsp' in res.url)
         return self.isLogined
 
-    def login(self, user, pwd, type, code=''):
-        if self.isLogined is None:
-            self.tst_net()
-        if self.isLogined is False:
-            if user == '' or pwd == '':
-                return (False, '用户名或密码为空')
-            self.data = {
-                'userId': user,
-                'password': pwd,
-                'service': self.services[type],
-                'operatorPwd': '',
-                'operatorUserId': '',
-                'validcode': code,
-                'passwordEncrypt': 'False'
-            }
-            res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
-            queryString = re.findall(r"href='.*?\?(.*?)'", res.content.decode('utf-8'), re.S)
-            self.data['queryString'] = queryString[0]
+    def _try_logout_once(self):
+        """无论是否在线，都尝试获取 userIndex 并调用 logout，失败忽略。"""
+        try:
+            # 尝试拿在线信息（若不在线可能返回空或报错）
+            if self.alldata is None:
+                try:
+                    res_info = requests.get('http://10.11.0.1/eportal/InterFace.do?method=getOnlineUserInfo', timeout=5)
+                    self.alldata = self._json_from_response(res_info)
+                except Exception:
+                    self.alldata = None
 
-            res = requests.post(self.url + 'login', headers=self.header, data=self.data, timeout=8)
-            login_json = self._json_from_response(res)
-            self.userindex = login_json.get('userIndex')
-            self.info = login_json.get('message', '')
-            if login_json.get('result') == 'success':
-                return (True, '认证成功')
-            else:
-                return (False, self.info)
-        return (True, '已经在线')
+            user_index = None
+            if isinstance(self.alldata, dict):
+                user_index = self.alldata.get('userIndex')
+
+            if user_index:
+                res = requests.post(self.url + 'logout', headers=self.header,
+                                    data={'userIndex': user_index}, timeout=8)
+                # 解析但不强校验结果，避免阻断流程
+                _ = self._json_from_response(res)
+        except Exception:
+            pass  # 任何异常都吞掉，保证“登录前先下线”的意图不影响后续
+        finally:
+            # 下线后清空缓存，避免复用旧 userIndex
+            self.alldata = None
+
+    def login(self, user, pwd, type, code=''):
+        # 1) 无论是否在线，先“尝试下线”一次
+        self._try_logout_once()
+
+        # 2) 确认当前状态
+        if self.isLogined is None:
+            try:
+                self.tst_net()
+            except Exception:
+                self.isLogined = False
+
+        # 3) 若已在线，仍然执行一次登录（有些门户需要重新带 queryString 刷新会话）
+        #    但为兼容旧逻辑：如果你更倾向“已在线就直接返回”，取消下面注释并删除继续分支。
+        # if self.isLogined:
+        #     return (True, '已经在线')
+
+        # 4) 执行登录流程
+        if user == '' or pwd == '':
+            return (False, '用户名或密码为空')
+
+        # 4.1 先拿 queryString
+        res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
+        html = self._text_from_response(res)
+        query = re.findall(r"href='.*?\?(.*?)'", html, re.S)
+        if not query:
+            # 兜底：有些页面结构变化，尝试另一种匹配方式
+            query = re.findall(r'href="[^"]+\?([^"]+)"', html, re.S)
+        if not query:
+            # 仍然失败：允许继续尝试登录（某些门户并不严格需要 queryString）
+            query_string = ''
+        else:
+            query_string = query[0]
+
+        # 4.2 组织参数并提交
+        self.data = {
+            'userId': user,
+            'password': pwd,
+            'service': self.services.get(type, self.services['校园网']),
+            'operatorPwd': '',
+            'operatorUserId': '',
+            'validcode': code,
+            'passwordEncrypt': 'False',
+            'queryString': query_string
+        }
+        res = requests.post(self.url + 'login', headers=self.header, data=self.data, timeout=8)
+        login_json = self._json_from_response(res)
+        self.userindex = login_json.get('userIndex')
+        self.info = login_json.get('message', '')
+        if login_json.get('result') == 'success':
+            self.isLogined = True
+            return (True, '认证成功')
+        else:
+            self.isLogined = False
+            return (False, self.info)
 
     def get_alldata(self):
         res = requests.get('http://10.11.0.1/eportal/InterFace.do?method=getOnlineUserInfo', timeout=5)
@@ -152,11 +231,18 @@ class Main():
     def logout(self):
         if self.alldata is None:
             self.get_alldata()
+        user_index = None
+        if isinstance(self.alldata, dict):
+            user_index = self.alldata.get('userIndex')
+        if not user_index:
+            # 没有 userIndex 也尝试调用一次，某些门户不严格
+            user_index = ''
         res = requests.post(self.url + 'logout', headers=self.header,
-                            data={'userIndex': self.alldata.get('userIndex')}, timeout=8)
+                            data={'userIndex': user_index}, timeout=8)
         logout_json = self._json_from_response(res)
         self.info = logout_json.get('message', '')
         if logout_json.get('result') == 'success':
+            self.isLogined = False
             return (True, '下线成功')
         else:
             return (False, self.info)
@@ -273,8 +359,7 @@ class MonitorWorker(QtCore.QObject):
             self.log.emit(self._ts() + f"网络正常 | ping {host} 成功")
             return
 
-        # 2) 不通则尝试认证（先看看是否未登录）
-        #    这里可以直接尝试 login；tst_net 只是判断是否在线，login 内部也会自行判断
+        # 2) 不通则尝试认证（认证前先下线的逻辑在 Main.login() 内部已实现）
         self.log.emit(self._ts() + "外网不通，尝试认证校园网...")
         try:
             state, info = self._main.login(
