@@ -5,8 +5,6 @@ import os
 import sys
 import json
 import re
-import time
-import threading
 import platform
 import subprocess
 from datetime import datetime
@@ -17,7 +15,7 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "NetAutoAuth"
+APP_NAME = "CloudLight校园网自动认证工具2.1"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
@@ -25,7 +23,7 @@ DEFAULT_CONFIG = {
     "type": "校园网",
     # 网络检测参数
     "check_host": "www.baidu.com",
-    "check_interval_sec": 60,
+    "check_interval_sec": 60.0,   # 支持小数秒
     "ping_timeout_ms": 1500,
     # 程序行为
     "auto_start_monitor": True,       # 启动时自动开始监控
@@ -93,7 +91,7 @@ class Main():
         :return: 是否已经认证
         '''
         res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
-        if res.url.find('success.jsp') > 0:
+        if 'success.jsp' in res.url:
             self.isLogined = True
         else:
             self.isLogined = False
@@ -117,9 +115,9 @@ class Main():
         :param code:验证码
         :return:元祖第一项：是否认证状态；第二项：详细信息
         '''
-        if self.isLogined == None:
+        if self.isLogined is None:
             self.tst_net()
-        if self.isLogined == False:
+        if self.isLogined is False:
             if user == '' or pwd == '':
                 return (False, '用户名或密码为空')
             self.data = {
@@ -137,10 +135,9 @@ class Main():
 
             res = requests.post(self.url + 'login', headers=self.header, data=self.data, timeout=8)
             login_json = json.loads(res.content.decode('utf-8'))
-            self.userindex = login_json['userIndex']
-            # self.info = login_json
-            self.info = login_json['message']
-            if login_json['result'] == 'success':
+            self.userindex = login_json.get('userIndex')
+            self.info = login_json.get('message', '')
+            if login_json.get('result') == 'success':
                 return (True, '认证成功')
             else:
                 return (False, self.info)
@@ -164,21 +161,19 @@ class Main():
         登出，操作内会自动获取特征码
         :return:元祖第一项：是否操作成功；第二项：详细信息
         '''
-        if self.alldata == None:
+        if self.alldata is None:
             self.get_alldata()
-
         res = requests.post(self.url + 'logout', headers=self.header,
-                            data={'userIndex': self.alldata['userIndex']}, timeout=8)
+                            data={'userIndex': self.alldata.get('userIndex')}, timeout=8)
         logout_json = json.loads(res.content.decode('utf-8'))
-        # self.info = logout_json
-        self.info = logout_json['message']
-        if logout_json['result'] == 'success':
+        self.info = logout_json.get('message', '')
+        if logout_json.get('result') == 'success':
             return (True, '下线成功')
         else:
             return (False, self.info)
 
 # -----------------------------
-# 监控线程（静默后台 ping）
+# 监控 worker（QThread + QTimer 事件驱动）
 # -----------------------------
 class MonitorWorker(QtCore.QObject):
     log = QtCore.Signal(str)
@@ -186,29 +181,45 @@ class MonitorWorker(QtCore.QObject):
 
     def __init__(self, cfg_getter):
         super().__init__()
-        self._cfg_getter = cfg_getter  # 函数：返回最新配置 dict
-        self._running = False
-        self._thread = None
+        self._cfg_getter = cfg_getter   # 函数：返回最新配置 dict
         self._main = Main()
+        self._running = False
+        self._timer = QtCore.QTimer(self)
+        self._timer.setSingleShot(False)
+        self._timer.timeout.connect(self._tick)
 
+    @QtCore.Slot()
     def start(self):
         if self._running:
             return
         self._running = True
         self.runningChanged.emit(True)
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
-        self.log.emit(self._ts() + "监控线程已启动")
+        self._apply_interval_from_cfg()
+        self._timer.start()
+        self.log.emit(self._ts() + "监控已启动（QTimer）")
+        # 立即执行一次
+        QtCore.QTimer.singleShot(0, self._tick)
 
+    @QtCore.Slot()
     def stop(self):
         if not self._running:
             return
         self._running = False
+        self._timer.stop()
         self.runningChanged.emit(False)
-        self.log.emit(self._ts() + "正在停止监控线程...")
+        self.log.emit(self._ts() + "监控已停止")
 
     def _ts(self):
         return datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
+
+    def _apply_interval_from_cfg(self):
+        cfg = self._cfg_getter()
+        try:
+            interval_sec = float(cfg.get("check_interval_sec", 60.0))
+        except Exception:
+            interval_sec = 60.0
+        interval_sec = max(0.01, interval_sec)  # 安全下限，支持小数秒
+        self._timer.setInterval(int(interval_sec * 1000))
 
     def _ping(self, host, timeout_ms):
         """静默后台 ping：Windows 下不弹出终端窗口"""
@@ -243,40 +254,41 @@ class MonitorWorker(QtCore.QObject):
             except Exception:
                 return False
 
-    def _run_loop(self):
-        while self._running:
-            cfg = self._cfg_getter()
-            host = cfg.get("check_host", "www.baidu.com")
-            interval = max(5, int(cfg.get("check_interval_sec", 60)))
+    @QtCore.Slot()
+    def _tick(self):
+        if not self._running:
+            return
+
+        # 动态读取配置（设置里改了值，这里自动生效）
+        self._apply_interval_from_cfg()
+        cfg = self._cfg_getter()
+
+        host = cfg.get("check_host", "www.baidu.com")
+        try:
             tout = int(cfg.get("ping_timeout_ms", 1500))
+        except Exception:
+            tout = 1500
 
-            ok = self._ping(host, tout)
-            if ok:
-                self.log.emit(self._ts() + f"网络正常 | ping {host} 成功")
-            else:
-                self.log.emit(self._ts() + "无网，尝试自动认证...")
-                try:
-                    self._main.tst_net()
-                except Exception as e:
-                    self.log.emit(self._ts() + f"认证状态检测异常：{e}")
+        ok = self._ping(host, tout)
+        if ok:
+            self.log.emit(self._ts() + f"网络正常 | ping {host} 成功")
+            return
 
-                try:
-                    state, info = self._main.login(
-                        user=cfg.get("user", ""),
-                        pwd=cfg.get("pwd", ""),
-                        type=cfg.get("type", "校园网")
-                    )
-                    self.log.emit(self._ts() + f"认证结果：{info}")
-                except Exception as e:
-                    self.log.emit(self._ts() + f"认证异常：{e}")
+        self.log.emit(self._ts() + "无网，尝试自动认证...")
+        try:
+            self._main.tst_net()
+        except Exception as e:
+            self.log.emit(self._ts() + f"认证状态检测异常：{e}")
 
-            # 分段睡眠，便于快速停止
-            for _ in range(interval):
-                if not self._running:
-                    break
-                time.sleep(1)
-
-        self.log.emit(self._ts() + "监控线程已停止")
+        try:
+            state, info = self._main.login(
+                user=cfg.get("user", ""),
+                pwd=cfg.get("pwd", ""),
+                type=cfg.get("type", "校园网")
+            )
+            self.log.emit(self._ts() + f"认证结果：{info}")
+        except Exception as e:
+            self.log.emit(self._ts() + f"认证异常：{e}")
 
 # -----------------------------
 # 设置对话框
@@ -303,9 +315,12 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.ed_host = QtWidgets.QLineEdit(self.cfg.get("check_host", "www.baidu.com"))
 
-        self.sp_interval = QtWidgets.QSpinBox()
-        self.sp_interval.setRange(5, 86400)
-        self.sp_interval.setValue(int(self.cfg.get("check_interval_sec", 60)))
+        # 改为 QDoubleSpinBox，支持小数秒
+        self.sp_interval = QtWidgets.QDoubleSpinBox()
+        self.sp_interval.setRange(0.01, 86400.0)
+        self.sp_interval.setDecimals(3)
+        self.sp_interval.setSingleStep(0.1)
+        self.sp_interval.setValue(float(self.cfg.get("check_interval_sec", 60.0)))
 
         self.sp_timeout = QtWidgets.QSpinBox()
         self.sp_timeout.setRange(200, 10000)
@@ -346,7 +361,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg["pwd"] = self.ed_pwd.text()
         self.cfg["type"] = self.cmb_type.currentText().strip()
         self.cfg["check_host"] = self.ed_host.text().strip() or "www.baidu.com"
-        self.cfg["check_interval_sec"] = int(self.sp_interval.value())
+        self.cfg["check_interval_sec"] = float(self.sp_interval.value())   # 小数秒
         self.cfg["ping_timeout_ms"] = int(self.sp_timeout.value())
         self.cfg["auto_start_monitor"] = bool(self.chk_auto_monitor.isChecked())
         self.cfg["auto_start_with_windows"] = bool(self.chk_boot.isChecked())
@@ -405,9 +420,14 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # 配置与监控
         self.cfg = load_config()
+
+        # Worker + 线程
         self.worker = MonitorWorker(self.get_config)
+        self.worker_thread = QtCore.QThread(self)
+        self.worker.moveToThread(self.worker_thread)
         self.worker.log.connect(self.append_log)
         self.worker.runningChanged.connect(self.on_running_changed)
+        self.worker_thread.start()
 
         # 自启动监控
         if self.cfg.get("auto_start_monitor", True):
@@ -429,7 +449,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop.setEnabled(running)
         self.act_stop.setEnabled(running)
 
-
     @QtCore.Slot(str)
     def append_log(self, s: str):
         self.log_view.append(s)
@@ -447,37 +466,34 @@ class MainWindow(QtWidgets.QMainWindow):
             self.activateWindow()
 
     def start_monitor(self):
-        self.worker.start()
+        # 通过元对象系统在工作线程中执行 start/stop
+        QtCore.QMetaObject.invokeMethod(self.worker, "start", QtCore.Qt.QueuedConnection)
         self.show_message("监控已启动")
 
     def stop_monitor(self):
-        self.worker.stop()
+        QtCore.QMetaObject.invokeMethod(self.worker, "stop", QtCore.Qt.QueuedConnection)
         self.show_message("监控已停止")
 
     def open_settings(self):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
-            # 读取新配置
             new_cfg = dlg.get_config()
-
-            # 记录当前是否在运行（Stop 可点击就代表正在运行）
             was_running = self.act_stop.isEnabled()
 
             # 应用开机自启
             self.apply_autostart(new_cfg.get("auto_start_with_windows", False))
 
-            # 更新内存并保存
-            self.cfg.update(new_cfg)
+            # 更新并落盘
+            self.cfg = new_cfg
             save_config(self.cfg)
 
-            # 日志 & 提示
             self.append_log(self.ts() + "已保存设置")
             self.show_message("设置已保存")
 
-            # 若正在运行，重启使新配置立即生效
+            # 若正在运行，立即生效（重启监控）
             if was_running:
-                self.worker.stop()
-                QtCore.QTimer.singleShot(150, self.worker.start)
+                self.stop_monitor()
+                QtCore.QTimer.singleShot(150, self.start_monitor)
 
     def apply_autostart(self, enabled: bool):
         if platform.system().lower().startswith("win"):
@@ -510,9 +526,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.show_message("程序已最小化到托盘。右键托盘图标可退出。")
 
     def exit_app(self):
-        # 优雅退出
-        self.worker.stop()
-        QtCore.QTimer.singleShot(300, QtWidgets.QApplication.instance().quit)
+        # 优雅退出：先停监控，再关闭线程与应用
+        QtCore.QMetaObject.invokeMethod(self.worker, "stop", QtCore.Qt.QueuedConnection)
+        QtCore.QTimer.singleShot(100, self._final_quit)
+
+    def _final_quit(self):
+        if hasattr(self, "worker_thread"):
+            self.worker_thread.quit()
+            self.worker_thread.wait(2000)
+        QtWidgets.QApplication.instance().quit()
 
 # -----------------------------
 # 入口
