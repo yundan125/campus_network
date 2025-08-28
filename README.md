@@ -33,32 +33,7 @@
   "user": "学号或账号",
   "pwd": "密码",
   "type": "校园网",
-  "check_host": "www.baidu.com",
   "check_interval_sec": 60,
-  "ping_timeout_ms": 1500,
   "auto_start_monitor": true,
   "auto_start_with_windows": false
 }
-🛠️ 打包方法
-
-如果需要自行打包 exe：
-
-安装依赖：
-
-pip install PySide6 requests pyinstaller
-
-
-确保目录下有：
-
-app.py（主程序）
-
-app.ico（图标，推荐多尺寸）
-
-执行命令：
-
-pyinstaller --noconsole --onefile --icon=app.ico --name NetAutoAuth --add-data "app.ico;." app.py
-
-
-生成的程序在：
-
-dist/NetAutoAuth.exe
