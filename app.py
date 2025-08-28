@@ -15,7 +15,7 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "NetAutoAuth"
+APP_NAME = "CloudLight校园网认证程序2.3"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
