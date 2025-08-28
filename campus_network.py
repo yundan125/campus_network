@@ -212,18 +212,48 @@ class MonitorWorker(QtCore.QObject):
     def _ts(self):
         return datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
 
-    def _ping(self, host, timeout_ms):
-        system = platform.system().lower()
-        if 'windows' in system:
-            cmd = ['ping', '-n', '1', '-w', str(int(timeout_ms)), host]
-        else:
-            cmd = ['ping', '-c', '1', host]
+    # 在 app.py 内，替换 MonitorWorker._ping
+def _ping(self, host, timeout_ms):
+    system = platform.system().lower()
+    if 'windows' in system:
+        cmd = ['ping', '-n', '1', '-w', str(int(timeout_ms)), host]
+
+        # 关键：在 Windows 下禁用控制台窗口
+        # 1) 使用 CREATE_NO_WINDOW
+        CREATE_NO_WINDOW = 0x08000000
+
+        # 2) 同时准备 STARTUPINFO 把窗口隐藏（双保险）
+        si = subprocess.STARTUPINFO()
+        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # 告诉子进程不要显示窗口
+        # si.wShowWindow = 0  # 可不设，STARTF_USESHOWWINDOW 即可
+
         try:
-            proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                  timeout=(int(timeout_ms)/1000.0 + 1))
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=(int(timeout_ms)/1000.0 + 1),
+                creationflags=CREATE_NO_WINDOW,   # <-- 不创建控制台窗口
+                startupinfo=si                    # <-- 隐藏窗口
+            )
             return proc.returncode == 0
         except Exception:
             return False
+
+    else:
+        # Linux / macOS 不会弹窗，按正常方式即可
+        cmd = ['ping', '-c', '1', host]
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=(int(timeout_ms)/1000.0 + 1)
+            )
+            return proc.returncode == 0
+        except Exception:
+            return False
+
 
     def _run_loop(self):
         while self._running:
@@ -436,14 +466,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def open_settings(self):
         dlg = SettingsDialog(self.cfg, self)
         if dlg.exec() == QtWidgets.QDialog.Accepted:
+            # 读取新配置
             new_cfg = dlg.get_config()
+
+            # 记录当前是否在运行（Stop 可点击就代表正在运行）
+            was_running = self.act_stop.isEnabled()
+
             # 应用开机自启
             self.apply_autostart(new_cfg.get("auto_start_with_windows", False))
-            # 保存配置
-            self.cfg = new_cfg
-            save_config(self.cfg)
+
+            # 更新内存中的配置并落盘
+            self.cfg.update(new_cfg)           # 内存立即更新
+            save_config(self.cfg)              # 写入 %APPDATA%\NetAutoAuth\config.json
+
+            # 日志 & 提示
             self.append_log(self.ts() + "已保存设置")
             self.show_message("设置已保存")
+
+            # 若监控线程正在运行，重启以立即生效（无需等下一轮循环）
+            if was_running:
+                self.worker.stop()
+                # 稍等片刻再启动，确保线程干净退出
+                QtCore.QTimer.singleShot(150, self.worker.start)
+
+
 
     def apply_autostart(self, enabled: bool):
         if platform.system().lower().startswith("win"):
