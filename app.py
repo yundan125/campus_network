@@ -11,12 +11,11 @@ import platform
 import subprocess
 from datetime import datetime
 
-# 第三方
 from PySide6 import QtCore, QtGui, QtWidgets
 import requests
 
 # -----------------------------
-# 路径 & 资源
+# 应用常量与资源
 # -----------------------------
 APP_NAME = "NetAutoAuth"
 DEFAULT_CONFIG = {
@@ -29,8 +28,8 @@ DEFAULT_CONFIG = {
     "check_interval_sec": 60,
     "ping_timeout_ms": 1500,
     # 程序行为
-    "auto_start_monitor": True,      # 启动时自动开始监控
-    "auto_start_with_windows": False # 是否开机自启
+    "auto_start_monitor": True,       # 启动时自动开始监控
+    "auto_start_with_windows": False  # 开机自启
 }
 
 def appdata_dir():
@@ -48,7 +47,6 @@ def load_config():
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            # 补全缺省字段
             for k, v in DEFAULT_CONFIG.items():
                 data.setdefault(k, v)
             return data
@@ -61,15 +59,14 @@ def save_config(cfg: dict):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 def resource_path(rel: str) -> str:
-    # PyInstaller 单文件运行态的资源目录
-    if hasattr(sys, "_MEIPASS"):
+    if hasattr(sys, "_MEIPASS"):  # PyInstaller 单文件临时目录
         return os.path.join(sys._MEIPASS, rel)
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), rel)
 
 ICON_PATH = resource_path("app.ico")
 
 # -----------------------------
-# 原有登录逻辑（基本不改动）
+# 原有登录逻辑（尽量不改动）
 # -----------------------------
 class Main():
     def __init__(self):
@@ -96,7 +93,7 @@ class Main():
         :return: 是否已经认证
         '''
         res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
-        if res.url.find('success.jsp')>0:
+        if res.url.find('success.jsp') > 0:
             self.isLogined = True
         else:
             self.isLogined = False
@@ -111,7 +108,7 @@ class Main():
         pass
         return False
 
-    def login(self,user,pwd,type,code=''):
+    def login(self, user, pwd, type, code=''):
         '''
         输入参数登入校园网，自动检测当前网络是否认证。
         :param user:登入id
@@ -124,7 +121,7 @@ class Main():
             self.tst_net()
         if self.isLogined == False:
             if user == '' or pwd == '':
-                return (False,'用户名或密码为空')
+                return (False, '用户名或密码为空')
             self.data = {
                 'userId': user,
                 'password': pwd,
@@ -132,7 +129,7 @@ class Main():
                 'operatorPwd': '',
                 'operatorUserId': '',
                 'validcode': code,
-                'passwordEncrypt':'False'
+                'passwordEncrypt': 'False'
             }
             res = requests.get('http://10.11.0.1', headers=self.header, timeout=5)
             queryString = re.findall(r"href='.*?\?(.*?)'", res.content.decode('utf-8'), re.S)
@@ -141,13 +138,13 @@ class Main():
             res = requests.post(self.url + 'login', headers=self.header, data=self.data, timeout=8)
             login_json = json.loads(res.content.decode('utf-8'))
             self.userindex = login_json['userIndex']
-            #self.info = login_json
+            # self.info = login_json
             self.info = login_json['message']
             if login_json['result'] == 'success':
-                return (True,'认证成功')
+                return (True, '认证成功')
             else:
-                return (False,self.info)
-        return (True,'已经在线')
+                return (False, self.info)
+        return (True, '已经在线')
 
     def get_alldata(self):
         '''
@@ -167,20 +164,21 @@ class Main():
         登出，操作内会自动获取特征码
         :return:元祖第一项：是否操作成功；第二项：详细信息
         '''
-        if self.alldata==None:
+        if self.alldata == None:
             self.get_alldata()
 
-        res = requests.post(self.url + 'logout', headers=self.header, data={'userIndex': self.alldata['userIndex']}, timeout=8)
+        res = requests.post(self.url + 'logout', headers=self.header,
+                            data={'userIndex': self.alldata['userIndex']}, timeout=8)
         logout_json = json.loads(res.content.decode('utf-8'))
-        #self.info = logout_json
+        # self.info = logout_json
         self.info = logout_json['message']
         if logout_json['result'] == 'success':
-            return (True,'下线成功')
+            return (True, '下线成功')
         else:
-            return (False,self.info)
+            return (False, self.info)
 
 # -----------------------------
-# 监控 Worker（线程）
+# 监控线程（静默后台 ping）
 # -----------------------------
 class MonitorWorker(QtCore.QObject):
     log = QtCore.Signal(str)
@@ -188,7 +186,7 @@ class MonitorWorker(QtCore.QObject):
 
     def __init__(self, cfg_getter):
         super().__init__()
-        self._cfg_getter = cfg_getter  # 可调用，返回最新配置 dict
+        self._cfg_getter = cfg_getter  # 函数：返回最新配置 dict
         self._running = False
         self._thread = None
         self._main = Main()
@@ -212,48 +210,38 @@ class MonitorWorker(QtCore.QObject):
     def _ts(self):
         return datetime.now().strftime("[%Y-%m-%d %H:%M:%S] ")
 
-    # 在 app.py 内，替换 MonitorWorker._ping
-def _ping(self, host, timeout_ms):
-    system = platform.system().lower()
-    if 'windows' in system:
-        cmd = ['ping', '-n', '1', '-w', str(int(timeout_ms)), host]
-
-        # 关键：在 Windows 下禁用控制台窗口
-        # 1) 使用 CREATE_NO_WINDOW
-        CREATE_NO_WINDOW = 0x08000000
-
-        # 2) 同时准备 STARTUPINFO 把窗口隐藏（双保险）
-        si = subprocess.STARTUPINFO()
-        si.dwFlags |= subprocess.STARTF_USESHOWWINDOW  # 告诉子进程不要显示窗口
-        # si.wShowWindow = 0  # 可不设，STARTF_USESHOWWINDOW 即可
-
-        try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=(int(timeout_ms)/1000.0 + 1),
-                creationflags=CREATE_NO_WINDOW,   # <-- 不创建控制台窗口
-                startupinfo=si                    # <-- 隐藏窗口
-            )
-            return proc.returncode == 0
-        except Exception:
-            return False
-
-    else:
-        # Linux / macOS 不会弹窗，按正常方式即可
-        cmd = ['ping', '-c', '1', host]
-        try:
-            proc = subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=(int(timeout_ms)/1000.0 + 1)
-            )
-            return proc.returncode == 0
-        except Exception:
-            return False
-
+    def _ping(self, host, timeout_ms):
+        """静默后台 ping：Windows 下不弹出终端窗口"""
+        system = platform.system().lower()
+        if 'windows' in system:
+            cmd = ['ping', '-n', '1', '-w', str(int(timeout_ms)), host]
+            CREATE_NO_WINDOW = 0x08000000
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=(int(timeout_ms) / 1000.0 + 1),
+                    creationflags=CREATE_NO_WINDOW,
+                    startupinfo=si
+                )
+                return proc.returncode == 0
+            except Exception:
+                return False
+        else:
+            cmd = ['ping', '-c', '1', host]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=(int(timeout_ms) / 1000.0 + 1)
+                )
+                return proc.returncode == 0
+            except Exception:
+                return False
 
     def _run_loop(self):
         while self._running:
@@ -266,7 +254,7 @@ def _ping(self, host, timeout_ms):
             if ok:
                 self.log.emit(self._ts() + f"网络正常 | ping {host} 成功")
             else:
-                self.log.emit(self._ts() + f"无网，尝试自动认证...")
+                self.log.emit(self._ts() + "无网，尝试自动认证...")
                 try:
                     self._main.tst_net()
                 except Exception as e:
@@ -274,15 +262,15 @@ def _ping(self, host, timeout_ms):
 
                 try:
                     state, info = self._main.login(
-                        user=cfg.get("user",""),
-                        pwd=cfg.get("pwd",""),
-                        type=cfg.get("type","校园网")
+                        user=cfg.get("user", ""),
+                        pwd=cfg.get("pwd", ""),
+                        type=cfg.get("type", "校园网")
                     )
                     self.log.emit(self._ts() + f"认证结果：{info}")
                 except Exception as e:
                     self.log.emit(self._ts() + f"认证异常：{e}")
 
-            # 分段睡眠，便于快速响应停止
+            # 分段睡眠，便于快速停止
             for _ in range(interval):
                 if not self._running:
                     break
@@ -303,24 +291,26 @@ class SettingsDialog(QtWidgets.QDialog):
 
         form = QtWidgets.QFormLayout()
 
-        self.ed_user = QtWidgets.QLineEdit(self.cfg.get("user",""))
-        self.ed_pwd = QtWidgets.QLineEdit(self.cfg.get("pwd",""))
+        self.ed_user = QtWidgets.QLineEdit(self.cfg.get("user", ""))
+        self.ed_pwd = QtWidgets.QLineEdit(self.cfg.get("pwd", ""))
         self.ed_pwd.setEchoMode(QtWidgets.QLineEdit.Password)
 
         self.cmb_type = QtWidgets.QComboBox()
         self.cmb_type.addItems(["校园网", "中国移动", "中国联通", "中国电信", "0", "1", "2", "3"])
-        idx = self.cmb_type.findText(self.cfg.get("type","校园网"))
-        if idx >= 0: self.cmb_type.setCurrentIndex(idx)
+        idx = self.cmb_type.findText(self.cfg.get("type", "校园网"))
+        if idx >= 0:
+            self.cmb_type.setCurrentIndex(idx)
 
-        self.ed_host = QtWidgets.QLineEdit(self.cfg.get("check_host","www.baidu.com"))
+        self.ed_host = QtWidgets.QLineEdit(self.cfg.get("check_host", "www.baidu.com"))
+
         self.sp_interval = QtWidgets.QSpinBox()
         self.sp_interval.setRange(5, 86400)
-        self.sp_interval.setValue(int(self.cfg.get("check_interval_sec",60)))
+        self.sp_interval.setValue(int(self.cfg.get("check_interval_sec", 60)))
 
         self.sp_timeout = QtWidgets.QSpinBox()
         self.sp_timeout.setRange(200, 10000)
         self.sp_timeout.setSingleStep(100)
-        self.sp_timeout.setValue(int(self.cfg.get("ping_timeout_ms",1500)))
+        self.sp_timeout.setValue(int(self.cfg.get("ping_timeout_ms", 1500)))
 
         self.chk_auto_monitor = QtWidgets.QCheckBox("启动时自动开始监控")
         self.chk_auto_monitor.setChecked(bool(self.cfg.get("auto_start_monitor", True)))
@@ -363,7 +353,7 @@ class SettingsDialog(QtWidgets.QDialog):
         return self.cfg
 
 # -----------------------------
-# 主窗口（仅显示日志；不驻留任务栏）
+# 主窗口（不在任务栏显示）
 # -----------------------------
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -372,14 +362,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.setWindowFlag(QtCore.Qt.Tool)
         self.setWindowTitle(APP_NAME)
         self.setWindowIcon(QtGui.QIcon(ICON_PATH))
-        self.resize(720, 420)
+        self.resize(780, 460)
 
-        # 日志窗口
+        # 日志视图
         self.log_view = QtWidgets.QTextEdit()
         self.log_view.setReadOnly(True)
         self.setCentralWidget(self.log_view)
 
-        # 按钮
+        # 工具栏按钮
         tb = QtWidgets.QToolBar()
         self.addToolBar(QtCore.Qt.TopToolBarArea, tb)
         self.btn_start = QtGui.QAction("开始", self)
@@ -404,7 +394,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.tray.setContextMenu(menu)
         self.tray.show()
 
-        # 信号连接
+        # 连接信号
         self.btn_start.triggered.connect(self.start_monitor)
         self.btn_stop.triggered.connect(self.stop_monitor)
         self.btn_settings.triggered.connect(self.open_settings)
@@ -413,17 +403,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_settings.triggered.connect(self.open_settings)
         self.act_exit.triggered.connect(self.exit_app)
 
-        # 配置 & 监控
+        # 配置与监控
         self.cfg = load_config()
         self.worker = MonitorWorker(self.get_config)
         self.worker.log.connect(self.append_log)
         self.worker.runningChanged.connect(self.on_running_changed)
 
-        # 自启动（监控）
+        # 自启动监控
         if self.cfg.get("auto_start_monitor", True):
             QtCore.QTimer.singleShot(500, self.start_monitor)
 
-        # 设置开机自启
+        # 应用开机自启
         self.apply_autostart(self.cfg.get("auto_start_with_windows", False))
 
         # 初始隐藏（只在托盘）
@@ -438,6 +428,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.act_start.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         self.act_stop.setEnabled(running)
+
 
     @QtCore.Slot(str)
     def append_log(self, s: str):
@@ -475,21 +466,18 @@ class MainWindow(QtWidgets.QMainWindow):
             # 应用开机自启
             self.apply_autostart(new_cfg.get("auto_start_with_windows", False))
 
-            # 更新内存中的配置并落盘
-            self.cfg.update(new_cfg)           # 内存立即更新
-            save_config(self.cfg)              # 写入 %APPDATA%\NetAutoAuth\config.json
+            # 更新内存并保存
+            self.cfg.update(new_cfg)
+            save_config(self.cfg)
 
             # 日志 & 提示
             self.append_log(self.ts() + "已保存设置")
             self.show_message("设置已保存")
 
-            # 若监控线程正在运行，重启以立即生效（无需等下一轮循环）
+            # 若正在运行，重启使新配置立即生效
             if was_running:
                 self.worker.stop()
-                # 稍等片刻再启动，确保线程干净退出
                 QtCore.QTimer.singleShot(150, self.worker.start)
-
-
 
     def apply_autostart(self, enabled: bool):
         if platform.system().lower().startswith("win"):
@@ -499,7 +487,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 with winreg.OpenKey(winreg.HKEY_CURRENT_USER, run_key, 0, winreg.KEY_ALL_ACCESS) as key:
                     app_key = APP_NAME
                     if enabled:
-                        exe_path = sys.executable if getattr(sys, 'frozen', False) else sys.argv[0]
+                        exe_path = sys.executable if getattr(sys, 'frozen', False) else os.path.abspath(sys.argv[0])
                         winreg.SetValueEx(key, app_key, 0, winreg.REG_SZ, f'"{exe_path}"')
                     else:
                         try:
@@ -519,7 +507,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # 点击关闭仅最小化到托盘
         event.ignore()
         self.hide()
-        self.show_message("程序最小化到托盘。右键托盘图标可退出。")
+        self.show_message("程序已最小化到托盘。右键托盘图标可退出。")
 
     def exit_app(self):
         # 优雅退出
@@ -532,13 +520,9 @@ class MainWindow(QtWidgets.QMainWindow):
 def main():
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-
-    # 设置全局图标（影响托盘气泡等）
     app.setWindowIcon(QtGui.QIcon(ICON_PATH))
 
     w = MainWindow()
-    # 初次在托盘里运行，如需打开窗口可双击托盘或右键菜单
-
     sys.exit(app.exec())
 
 if __name__ == "__main__":
