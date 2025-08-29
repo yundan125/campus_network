@@ -429,6 +429,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setModal(True)
         self.cfg = cfg.copy()
 
+        # ===== 表单区 =====
         form = QtWidgets.QFormLayout()
 
         self.ed_user = QtWidgets.QLineEdit(self.cfg.get("user", ""))
@@ -436,7 +437,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.ed_pwd.setEchoMode(QtWidgets.QLineEdit.Password)
 
         self.cmb_type = QtWidgets.QComboBox()
-        self.cmb_type.addItems(["校园网", "中国移动", "中国联通", "中国电信", "0", "1", "2", "3"])
+        self.cmb_type.addItems(["校园网", "中国移动", "中国联通", "中国电信"])
         idx = self.cmb_type.findText(self.cfg.get("type", "校园网"))
         if idx >= 0:
             self.cmb_type.setCurrentIndex(idx)
@@ -477,12 +478,19 @@ class SettingsDialog(QtWidgets.QDialog):
         self.sp_post_timeout.setSingleStep(100)
         self.sp_post_timeout.setValue(int(self.cfg.get("post_login_ping_timeout_ms", 0)))
 
+        # 程序行为
+        self.chk_auto_monitor = QtWidgets.QCheckBox("启动时自动开始监控")
+        self.chk_auto_monitor.setChecked(bool(self.cfg.get("auto_start_monitor", True)))
+        self.chk_boot = QtWidgets.QCheckBox("开机自启")
+        self.chk_boot.setChecked(bool(self.cfg.get("auto_start_with_windows", False)))
+
+        # 布局到表单
         form.addRow("账号：", self.ed_user)
         form.addRow("密码：", self.ed_pwd)
         form.addRow("运营商：", self.cmb_type)
         form.addRow("检测目标（主）：", self.ed_host)
-        form.addRow("检测目标（备-阿里）：", self.ed_fallback)
-        form.addRow("检测目标（第三-腾讯）：", self.ed_tertiary)
+        form.addRow("检测目标（备）：", self.ed_fallback)
+        form.addRow("检测目标（第三）：", self.ed_tertiary)
         form.addRow("ping 超时（毫秒）：", self.sp_ping_timeout)
         form.addRow("检测间隔（秒）：", self.sp_interval)
         form.addRow("重连时等待时间（秒）：", self.sp_reconnect_wait)
@@ -491,7 +499,17 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("登录后检测目标（备，可留空）：", self.ed_post_fallback)
         form.addRow("登录后检测目标（第三，可留空）：", self.ed_post_tertiary)
         form.addRow("登录后 ping 超时（毫秒，0=沿用）：", self.sp_post_timeout)
+        form.addRow("", self.chk_auto_monitor)
+        form.addRow("", self.chk_boot)
 
+        # 放入可滚动区域
+        form_widget = QtWidgets.QWidget()
+        form_widget.setLayout(form)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(form_widget)
+
+        # ===== 按钮区 =====
         btn_ok = QtWidgets.QPushButton("保存")
         btn_cancel = QtWidgets.QPushButton("取消")
         btn_ok.clicked.connect(self.accept)
@@ -502,8 +520,9 @@ class SettingsDialog(QtWidgets.QDialog):
         h.addWidget(btn_ok)
         h.addWidget(btn_cancel)
 
+        # ===== 总体布局 =====
         v = QtWidgets.QVBoxLayout(self)
-        v.addLayout(form)
+        v.addWidget(scroll)
         v.addLayout(h)
 
     def get_config(self):
@@ -521,9 +540,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg["post_login_fallback_host"] = self.ed_post_fallback.text().strip()
         self.cfg["post_login_tertiary_host"] = self.ed_post_tertiary.text().strip()
         self.cfg["post_login_ping_timeout_ms"] = int(self.sp_post_timeout.value())
-        self.cfg["auto_start_monitor"] = bool(self.cfg.get("auto_start_monitor", True))
-        self.cfg["auto_start_with_windows"] = bool(self.cfg.get("auto_start_with_windows", False))
+        # 关键：写回两个行为设置
+        self.cfg["auto_start_monitor"] = bool(self.chk_auto_monitor.isChecked())
+        self.cfg["auto_start_with_windows"] = bool(self.chk_boot.isChecked())
         return self.cfg
+
 
 # -----------------------------
 # 主窗口（含日志裁剪）
