@@ -1,5 +1,9 @@
 # 燕山大学校园网自动认证工具
 
+
+![image](readme.png)
+
+
 **燕山大学校园网自动认证工具** —— 托盘常驻，掉线自动重连，带可视化日志界面与设置界面。
 
 ## ✨ 功能特性
@@ -9,6 +13,7 @@
 - ⚙️ 设置界面可修改：
   - 账号、密码、运营商
   - 检测间隔（秒）
+  - ping的服务器
   - `ping` 超时（毫秒）
   - 是否启动时自动开始监控
   - 是否开机自启
@@ -25,14 +30,3 @@
 ## ⚙️ 配置文件
 配置文件路径：
 %APPDATA%\NetAutoAuth\config.json
-
-默认内容示例：
-```json
-{
-  "user": "学号或账号",
-  "pwd": "密码",
-  "type": "校园网",
-  "check_interval_sec": 60,
-  "auto_start_monitor": true,
-  "auto_start_with_windows": false
-}
