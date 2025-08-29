@@ -465,7 +465,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.sp_reconnect_wait.setValue(float(self.cfg.get("reconnect_wait_sec", 5.0)))
 
         self.sp_max_lines = QtWidgets.QSpinBox()
-        self.sp_max_lines.setRange(100, 9999999999)
+        self.sp_max_lines.setRange(100, 9999999)
         self.sp_max_lines.setSingleStep(100)
         self.sp_max_lines.setValue(int(self.cfg.get("max_log_lines", 1000)))
 
