@@ -17,21 +17,23 @@ import requests
 # -----------------------------
 # 应用常量与资源
 # -----------------------------
-APP_NAME = "CloudLight燕山大学校园网认证程序2.8"
+APP_NAME = "CloudLight燕山大学校园网认证程序2.9"
 DEFAULT_CONFIG = {
     "user": "",
     "pwd": "",
     "type": "校园网",
 
     # 周期性检测（按 ping 判断是否有网）
-    "check_host": "www.baidu.com",
-    "fallback_check_host": "223.5.5.5",          # 新增：阿里备用（AliDNS）
+    "check_host": "www.baidu.com",     # 主：百度
+    "fallback_check_host": "223.5.5.5",# 备：阿里 AliDNS
+    "tertiary_check_host": "119.29.29.29",  # 第三：腾讯 DNS
     "ping_timeout_ms": 1500,
-    "check_interval_sec": 30.0,                   # 周期检测间隔（秒）
+    "check_interval_sec": 30.0,             # 周期检测间隔（秒）
 
-    # 登录成功后的二次校验（留空/0 则回退到上面的检测目标与超时）
+    # 登录成功后的二次校验（留空/0 则回退到上面的目标与超时）
     "post_login_check_host": "",
-    "post_login_fallback_host": "",               # 新增：登录后备用目标
+    "post_login_fallback_host": "",
+    "post_login_tertiary_host": "",
     "post_login_ping_timeout_ms": 0,
 
     # 重连等待
@@ -39,7 +41,10 @@ DEFAULT_CONFIG = {
 
     # 程序行为
     "auto_start_monitor": True,
-    "auto_start_with_windows": False
+    "auto_start_with_windows": False,
+
+    # 日志保留
+    "max_log_lines": 1000
 }
 
 def appdata_dir():
@@ -230,7 +235,7 @@ class Main():
             return (False, self.info)
 
 # -----------------------------
-# 监控 worker（QTimer 驱动，按 ping 检测）
+# 监控 worker（QTimer 驱动，按 ping 三级检测）
 # -----------------------------
 class MonitorWorker(QtCore.QObject):
     log = QtCore.Signal(str)
@@ -310,15 +315,24 @@ class MonitorWorker(QtCore.QObject):
             except Exception:
                 return False
 
-    def _ping_pair_ok(self, primary_host, fallback_host, timeout_ms):
-        """先 ping 主目标，不通再 ping 备用；任一成功即判定可达。"""
-        if primary_host:
-            if self._ping_once(primary_host, timeout_ms):
-                return True, primary_host
-        if fallback_host and fallback_host != primary_host:
-            if self._ping_once(fallback_host, timeout_ms):
-                return True, fallback_host
-        return False, fallback_host or primary_host
+    def _ping_chain_ok(self, hosts, timeout_ms):
+        """
+        依次按 hosts 进行 ping；任一成功即判定可达。
+        返回：(是否可达, 命中的 host 或最后一个尝试的 host)
+        """
+        tried = None
+        for h in hosts:
+            h = (h or '').strip()
+            if not h:
+                continue
+            # 跳过重复 host
+            if tried == h:
+                continue
+            tried = h
+            if self._ping_once(h, timeout_ms):
+                return True, h
+        # 全部失败：返回最后尝试的 host（用于日志）
+        return False, tried
 
     def _sleep_with_cancel(self, sec):
         """可中断睡眠，停止时能快速退出等待。"""
@@ -333,22 +347,23 @@ class MonitorWorker(QtCore.QObject):
         self._apply_interval_from_cfg()
         cfg = self._cfg_getter()
 
-        # 读取检测参数
+        # 读取检测参数（三级链：主→备→第三）
         primary = (cfg.get("check_host") or "www.baidu.com").strip()
         fallback = (cfg.get("fallback_check_host") or "223.5.5.5").strip()
+        tertiary = (cfg.get("tertiary_check_host") or "119.29.29.29").strip()
         try:
             tout = int(cfg.get("ping_timeout_ms", 1500))
         except Exception:
             tout = 1500
 
-        # 1) 先按两级 ping 检测外网是否可达
-        ok, hit = self._ping_pair_ok(primary, fallback, tout)
+        # 1) 先按三级 ping 检测外网是否可达
+        ok, hit = self._ping_chain_ok([primary, fallback, tertiary], tout)
         if ok:
             self.log.emit(self._ts() + f"网络正常 | ping {hit} 成功")
             return
 
         # 2) 不通则尝试认证（认证前先下线的逻辑在 Main.login() 内部已实现）
-        self.log.emit(self._ts() + f"外网不通（{primary} / {fallback} 均失败），尝试认证校园网...")
+        self.log.emit(self._ts() + f"外网不通（{primary} / {fallback} / {tertiary} 均失败），尝试认证校园网...")
         try:
             state, info = self._main.login(
                 user=cfg.get("user", ""),
@@ -360,20 +375,21 @@ class MonitorWorker(QtCore.QObject):
             self.log.emit(self._ts() + f"认证异常：{e}")
             return
 
-        # 3) 若认证成功但外网仍不通 → 持续重试直到通或停止（两级 ping）
+        # 3) 若认证成功但外网仍不通 → 持续重试直到通或停止（三级 ping）
         if state:
-            post_primary = (cfg.get("post_login_check_host") or primary).strip()
-            post_fallback = (cfg.get("post_login_fallback_host") or fallback).strip()
+            post_primary   = (cfg.get("post_login_check_host") or primary).strip()
+            post_fallback  = (cfg.get("post_login_fallback_host") or fallback).strip()
+            post_tertiary  = (cfg.get("post_login_tertiary_host") or tertiary).strip()
             post_tout = int(cfg.get("post_login_ping_timeout_ms") or tout)
             wait_sec = float(cfg.get("reconnect_wait_sec", 5.0))
 
             while self._running:
-                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{post_primary} / {post_fallback}）...")
+                self.log.emit(self._ts() + f"认证成功，3 秒后检查外网连通性（{post_primary} / {post_fallback} / {post_tertiary}）...")
                 self._sleep_with_cancel(3.0)
                 if not self._running:
                     break
 
-                ok2, hit2 = self._ping_pair_ok(post_primary, post_fallback, post_tout)
+                ok2, hit2 = self._ping_chain_ok([post_primary, post_fallback, post_tertiary], post_tout)
                 if ok2:
                     self.log.emit(self._ts() + f"外网连通性正常（{hit2} 可达）")
                     break  # 成功，结束重试
@@ -403,7 +419,7 @@ class MonitorWorker(QtCore.QObject):
             return
 
 # -----------------------------
-# 设置对话框（加入 ping 主/备目标设置）
+# 设置对话框（加入主/备/第三 ping 目标 & 日志限量）
 # -----------------------------
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self, cfg: dict, parent=None):
@@ -428,13 +444,15 @@ class SettingsDialog(QtWidgets.QDialog):
         # 检测参数（按 ping）
         self.ed_host = QtWidgets.QLineEdit(self.cfg.get("check_host", "www.baidu.com"))
         self.ed_fallback = QtWidgets.QLineEdit(self.cfg.get("fallback_check_host", "223.5.5.5"))
+        self.ed_tertiary = QtWidgets.QLineEdit(self.cfg.get("tertiary_check_host", "119.29.29.29"))
+
         self.sp_ping_timeout = QtWidgets.QSpinBox()
         self.sp_ping_timeout.setRange(200, 20000)
         self.sp_ping_timeout.setSingleStep(100)
         self.sp_ping_timeout.setValue(int(self.cfg.get("ping_timeout_ms", 1500)))
 
         self.sp_interval = QtWidgets.QDoubleSpinBox()
-        self.sp_interval.setRange(1.0, 86400.0)
+        self.sp_interval.setRange(0.01, 86400.0)
         self.sp_interval.setDecimals(2)
         self.sp_interval.setSingleStep(1.0)
         self.sp_interval.setValue(float(self.cfg.get("check_interval_sec", 30.0)))
@@ -445,15 +463,15 @@ class SettingsDialog(QtWidgets.QDialog):
         self.sp_reconnect_wait.setSingleStep(0.5)
         self.sp_reconnect_wait.setValue(float(self.cfg.get("reconnect_wait_sec", 5.0)))
 
-        self.chk_auto_monitor = QtWidgets.QCheckBox("启动时自动开始监控")
-        self.chk_auto_monitor.setChecked(bool(self.cfg.get("auto_start_monitor", True)))
-
-        self.chk_boot = QtWidgets.QCheckBox("开机自启")
-        self.chk_boot.setChecked(bool(self.cfg.get("auto_start_with_windows", False)))
+        self.sp_max_lines = QtWidgets.QSpinBox()
+        self.sp_max_lines.setRange(100, 20000)
+        self.sp_max_lines.setSingleStep(100)
+        self.sp_max_lines.setValue(int(self.cfg.get("max_log_lines", 1000)))
 
         # 登录后二次校验（可选）
         self.ed_post_host = QtWidgets.QLineEdit(self.cfg.get("post_login_check_host", ""))
         self.ed_post_fallback = QtWidgets.QLineEdit(self.cfg.get("post_login_fallback_host", ""))
+        self.ed_post_tertiary = QtWidgets.QLineEdit(self.cfg.get("post_login_tertiary_host", ""))
         self.sp_post_timeout = QtWidgets.QSpinBox()
         self.sp_post_timeout.setRange(0, 20000)  # 0 表示回退到 ping_timeout_ms
         self.sp_post_timeout.setSingleStep(100)
@@ -462,16 +480,17 @@ class SettingsDialog(QtWidgets.QDialog):
         form.addRow("账号：", self.ed_user)
         form.addRow("密码：", self.ed_pwd)
         form.addRow("运营商：", self.cmb_type)
-        form.addRow("检测目标（ping 主）：", self.ed_host)
-        form.addRow("备用检测目标（ping 备）：", self.ed_fallback)
+        form.addRow("检测目标（主）：", self.ed_host)
+        form.addRow("检测目标（备-阿里）：", self.ed_fallback)
+        form.addRow("检测目标（第三-腾讯）：", self.ed_tertiary)
         form.addRow("ping 超时（毫秒）：", self.sp_ping_timeout)
         form.addRow("检测间隔（秒）：", self.sp_interval)
         form.addRow("重连时等待时间（秒）：", self.sp_reconnect_wait)
-        form.addRow("登录后检测目标（可留空）：", self.ed_post_host)
-        form.addRow("登录后备用目标（可留空）：", self.ed_post_fallback)
+        form.addRow("日志最多保留行数：", self.sp_max_lines)
+        form.addRow("登录后检测目标（主，可留空）：", self.ed_post_host)
+        form.addRow("登录后检测目标（备，可留空）：", self.ed_post_fallback)
+        form.addRow("登录后检测目标（第三，可留空）：", self.ed_post_tertiary)
         form.addRow("登录后 ping 超时（毫秒，0=沿用）：", self.sp_post_timeout)
-        form.addRow("", self.chk_auto_monitor)
-        form.addRow("", self.chk_boot)
 
         btn_ok = QtWidgets.QPushButton("保存")
         btn_cancel = QtWidgets.QPushButton("取消")
@@ -493,18 +512,21 @@ class SettingsDialog(QtWidgets.QDialog):
         self.cfg["type"] = self.cmb_type.currentText().strip()
         self.cfg["check_host"] = self.ed_host.text().strip() or "www.baidu.com"
         self.cfg["fallback_check_host"] = self.ed_fallback.text().strip() or "223.5.5.5"
+        self.cfg["tertiary_check_host"] = self.ed_tertiary.text().strip() or "119.29.29.29"
         self.cfg["ping_timeout_ms"] = int(self.sp_ping_timeout.value())
         self.cfg["check_interval_sec"] = float(self.sp_interval.value())
         self.cfg["reconnect_wait_sec"] = float(self.sp_reconnect_wait.value())
+        self.cfg["max_log_lines"] = int(self.sp_max_lines.value())
         self.cfg["post_login_check_host"] = self.ed_post_host.text().strip()
         self.cfg["post_login_fallback_host"] = self.ed_post_fallback.text().strip()
+        self.cfg["post_login_tertiary_host"] = self.ed_post_tertiary.text().strip()
         self.cfg["post_login_ping_timeout_ms"] = int(self.sp_post_timeout.value())
-        self.cfg["auto_start_monitor"] = bool(self.chk_auto_monitor.isChecked())
-        self.cfg["auto_start_with_windows"] = bool(self.chk_boot.isChecked())
+        self.cfg["auto_start_monitor"] = bool(self.cfg.get("auto_start_monitor", True))
+        self.cfg["auto_start_with_windows"] = bool(self.cfg.get("auto_start_with_windows", False))
         return self.cfg
 
 # -----------------------------
-# 主窗口
+# 主窗口（含日志裁剪）
 # -----------------------------
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
@@ -574,9 +596,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.btn_stop.setEnabled(running)
         self.act_stop.setEnabled(running)
 
+    def _trim_logs(self):
+        """裁剪 QTextEdit 仅保留配置中的最多行数，避免越用越卡。"""
+        max_lines = int(self.cfg.get("max_log_lines", 1000))
+        doc = self.log_view.document()
+        block_count = doc.blockCount()
+        if block_count <= max_lines:
+            return
+        # 删除最早的多余行
+        extra = block_count - max_lines
+        cursor = QtGui.QTextCursor(doc)
+        cursor.beginEditBlock()
+        cursor.movePosition(QtGui.QTextCursor.Start)
+        for _ in range(extra):
+            cursor.select(QtGui.QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()  # 删除换行
+        cursor.endEditBlock()
+
     @QtCore.Slot(str)
     def append_log(self, s: str):
         self.log_view.append(s)
+        self._trim_logs()
 
     def on_tray_activated(self, reason):
         if reason == QtWidgets.QSystemTrayIcon.Trigger:  # 单击托盘图标
